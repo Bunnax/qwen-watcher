@@ -1,12 +1,13 @@
 {
   "name": "qwen-watcher",
   "version": "1.0.0",
-  "description": "Qwen Watcher Dashboard",
+  "description": "Qwen Watcher Trading Dashboard",
   "main": "qwen-backend.js",
   "scripts": {
     "start": "node qwen-backend.js"
   },
   "dependencies": {
+    "express": "^4.19.2",
     "ws": "^8.18.0"
   }
 }
