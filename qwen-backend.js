@@ -1,6 +1,5 @@
-// qwen-backend.js - QWEN WATCHER application backend
-// browser -> THIS backend (WSS /feed + HTTPS /api) -> Coinbase -> real data
-// Setup: npm i ws | node qwen-backend.js | open http://localhost:8787
+// qwen-backend.js v2 - relay + multi-source market-data proxy
+// browser -> THIS backend (/feed WS + /api REST) -> Coinbase/Exchange/Bitstamp -> real data
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -9,32 +8,90 @@ const { WebSocketServer, WebSocket } = require('ws');
 const PORT = process.env.PORT || 8787;
 const UPSTREAM = 'wss://advanced-trade-ws.coinbase.com';
 const PRODUCTS = ['BTC-USD', 'ETH-USD', 'SOL-USD'];
+const BITSTAMP = { 'BTC-USD': 'btcusd', 'ETH-USD': 'ethusd', 'SOL-USD': 'solusd' };
+const GRAN_SECONDS = { ONE_MINUTE: 60, FIVE_MINUTE: 300, FIFTEEN_MINUTE: 900, THIRTY_MINUTE: 1800, ONE_HOUR: 3600, TWO_HOUR: 7200, SIX_HOUR: 21600, ONE_DAY: 86400 };
 let upstream = null, upstreamState = 'IDLE', attempts = 0;
 
 function log(m) { console.log('[qwen-backend] ' + new Date().toISOString() + ' ' + m); }
-
-function proxyCoinbase(cbPath, search, res) {
-  fetch('https://api.coinbase.com' + cbPath + search, { headers: { Accept: 'application/json' } })
-    .then(async function (r) {
-      const body = await r.text();
-      res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(body);
-    })
-    .catch(function (e) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: String(e) }));
-    });
+function json(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+async function getJSON(url, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(function () { ctrl.abort(); }, ms || 8000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
 }
 
-const server = http.createServer(function (req, res) {
+async function tickers(product) {
+  try {
+    const j = await getJSON('https://api.coinbase.com/api/v3/brokerage/market/tickers?product_id=' + product);
+    const t = j && j.tickers && j.tickers[0];
+    if (t && isFinite(parseFloat(t.price))) return { tickers: [{ price: parseFloat(t.price), price_percent_change_24h: parseFloat(t.price_percent_change_24h) }], source: 'coinbase-v3' };
+  } catch (e) { log('tickers v3 ' + product + ' failed: ' + e.message); }
+  try {
+    const s = await getJSON('https://api.exchange.coinbase.com/products/' + product + '/stats');
+    const last = parseFloat(s.last), open = parseFloat(s.open);
+    if (isFinite(last)) return { tickers: [{ price: last, price_percent_change_24h: isFinite(open) && open ? ((last - open) / open) * 100 : null }], source: 'coinbase-exchange' };
+  } catch (e) { log('tickers exchange ' + product + ' failed: ' + e.message); }
+  const pair = BITSTAMP[product];
+  if (pair) {
+    try {
+      const b = await getJSON('https://www.bitstamp.net/api/v2/ticker/' + pair + '/');
+      const last = parseFloat(b.last);
+      if (isFinite(last)) return { tickers: [{ price: last, price_percent_change_24h: parseFloat(b.percent_change_24h) }], source: 'bitstamp' };
+    } catch (e) { log('tickers bitstamp ' + product + ' failed: ' + e.message); }
+  }
+  const err = new Error('all ticker sources failed'); err.status = 502; throw err;
+}
+
+async function candles(product, gran, limit) {
+  const sec = GRAN_SECONDS[gran] || parseInt(gran, 10) || 900;
+  try {
+    const j = await getJSON('https://api.coinbase.com/api/v3/brokerage/market/candles?product_id=' + product + '&granularity=' + gran + '&limit=' + (limit || 300));
+    if (j && Array.isArray(j.candles) && j.candles.length) {
+      return { candles: j.candles.map(function (c) { return { start: +c.start, open: +c.open, high: +c.high, low: +c.low, close: +c.close, volume: +c.volume }; }).reverse(), source: 'coinbase-v3' };
+    }
+  } catch (e) { log('candles v3 ' + product + ' failed: ' + e.message); }
+  try {
+    const rows = await getJSON('https://api.exchange.coinbase.com/products/' + product + '/candles?granularity=' + sec);
+    if (Array.isArray(rows) && rows.length) {
+      return { candles: rows.map(function (r) { return { start: r[0], open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[5] }; }).reverse(), source: 'coinbase-exchange' };
+    }
+  } catch (e) { log('candles exchange ' + product + ' failed: ' + e.message); }
+  const pair = BITSTAMP[product];
+  if (pair) {
+    try {
+      const b = await getJSON('https://www.bitstamp.net/api/v2/ohlc/' + pair + '/?step=' + sec + '&limit=' + Math.min(limit || 300, 1000));
+      const ohlc = b && b.data && b.data.ohlc;
+      if (Array.isArray(ohlc) && ohlc.length) {
+        return { candles: ohlc.map(function (c) { return { start: +c.time, open: +c.open, high: +c.high, low: +c.low, close: +c.close, volume: +c.volume }; }), source: 'bitstamp' };
+      }
+    } catch (e) { log('candles bitstamp ' + product + ' failed: ' + e.message); }
+  }
+  const err = new Error('all candle sources failed'); err.status = 502; throw err;
+}
+
+const server = http.createServer(async function (req, res) {
   const u = new URL(req.url, 'http://localhost');
-  if (u.pathname === '/api/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, upstream: upstreamState }));
+  if (u.pathname === '/api/health') { json(res, 200, { ok: true, upstream: upstreamState }); return; }
+  if (u.pathname === '/api/tickers') {
+    try { const j = await tickers(u.searchParams.get('product_id') || 'BTC-USD'); log('tickers ' + (u.searchParams.get('product_id') || 'BTC-USD') + ' via ' + j.source); json(res, 200, j); }
+    catch (e) { json(res, e.status || 502, { error: String(e.message) }); }
     return;
   }
-  if (u.pathname === '/api/tickers') { proxyCoinbase('/api/v3/brokerage/market/tickers', u.search, res); return; }
-  if (u.pathname === '/api/candles') { proxyCoinbase('/api/v3/brokerage/market/candles', u.search, res); return; }
+  if (u.pathname === '/api/candles') {
+    try {
+      const j = await candles(u.searchParams.get('product_id') || 'BTC-USD', u.searchParams.get('granularity') || 'FIFTEEN_MINUTE', parseInt(u.searchParams.get('limit'), 10) || 300);
+      log('candles ' + (u.searchParams.get('product_id') || 'BTC-USD') + ' via ' + j.source);
+      json(res, 200, j);
+    } catch (e) { json(res, e.status || 502, { error: String(e.message) }); }
+    return;
+  }
   let file = u.pathname === '/' ? 'qwen-watcher.html' : decodeURIComponent(u.pathname.replace(/^\/+/, ''));
   if (file.indexOf('..') !== -1) { res.writeHead(400); res.end('bad path'); return; }
   const fp = path.join(__dirname, file);
