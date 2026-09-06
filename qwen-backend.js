@@ -90,3 +90,7 @@ app.get('/api/health', (req, res) => {
 server.listen(PORT, () => {
   console.log(`[qwen-backend] Server listening on port ${PORT}`);
 });
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
