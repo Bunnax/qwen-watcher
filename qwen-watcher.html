@@ -3,10 +3,32 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Qwen Watcher</title>
+  <title>Qwen Watcher Dashboard</title>
+  <style>
+    body { font-family: monospace; background: #121212; color: #00ff66; padding: 20px; }
+    .card { border: 1px solid #00ff66; padding: 15px; border-radius: 5px; max-width: 400px; }
+    .status { font-weight: bold; }
+  </style>
 </head>
 <body>
   <h1>Qwen Watcher Dashboard</h1>
-  <p>Status: Active</p>
+  <div class="card">
+    <p>Service: <span id="service">Connecting...</span></p>
+    <p>Status: <span id="status" class="status">Offline</span></p>
+  </div>
+
+  <script>
+    async function checkBackend() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        document.getElementById('service').innerText = data.service;
+        document.getElementById('status').innerText = data.status.toUpperCase();
+      } catch (err) {
+        document.getElementById('status').innerText = 'OFFLINE (Server not running)';
+      }
+    }
+    checkBackend();
+  </script>
 </body>
 </html>
