@@ -8,13 +8,15 @@
     body { font-family: monospace; background: #121212; color: #00ff66; padding: 20px; }
     .card { border: 1px solid #00ff66; padding: 15px; border-radius: 5px; max-width: 400px; }
     .status { font-weight: bold; }
+    .pulse { display: inline-block; width: 8px; height: 8px; background: #00ff66; border-radius: 50%; margin-left: 8px; }
   </style>
 </head>
 <body>
   <h1>Qwen Watcher Dashboard</h1>
   <div class="card">
     <p>Service: <span id="service">Connecting...</span></p>
-    <p>Status: <span id="status" class="status">Offline</span></p>
+    <p>Status: <span id="status" class="status">Offline</span><span id="indicator"></span></p>
+    <p>Last Checked: <span id="time">-</span></p>
   </div>
 
   <script>
@@ -24,11 +26,15 @@
         const data = await res.json();
         document.getElementById('service').innerText = data.service;
         document.getElementById('status').innerText = data.status.toUpperCase();
+        document.getElementById('indicator').className = 'pulse';
+        document.getElementById('time').innerText = new Date().toLocaleTimeString();
       } catch (err) {
-        document.getElementById('status').innerText = 'OFFLINE (Server not running)';
+        document.getElementById('status').innerText = 'OFFLINE';
+        document.getElementById('indicator').className = '';
       }
     }
     checkBackend();
+    setInterval(checkBackend, 5000);
   </script>
 </body>
 </html>
