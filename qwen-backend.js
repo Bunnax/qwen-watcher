@@ -1,96 +1,100 @@
-const express = require('express');
+// qwen-backend.js - QWEN WATCHER application backend
+// browser -> THIS backend (WSS /feed + HTTPS /api) -> Coinbase -> real data
+// Setup: npm i ws | node qwen-backend.js | open http://localhost:8787
 const http = require('http');
-const WebSocket = require('ws');
+const fs = require('fs');
 const path = require('path');
+const { WebSocketServer, WebSocket } = require('ws');
 
-const app = express();
-const server = http.createServer(app);
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 8787;
+const UPSTREAM = 'wss://advanced-trade-ws.coinbase.com';
+const PRODUCTS = ['BTC-USD', 'ETH-USD', 'SOL-USD'];
+let upstream = null, upstreamState = 'IDLE', attempts = 0;
 
-app.use(express.static(path.join(__dirname)));
-app.use(express.json());
+function log(m) { console.log('[qwen-backend] ' + new Date().toISOString() + ' ' + m); }
 
-let cbSocket = null;
-let upstreamStatus = 'CLOSED';
-const clients = new Set();
-
-function connectUpstream() {
-  console.log('[qwen-backend] Connecting to Coinbase Advanced Trade WS...');
-  upstreamStatus = 'CONNECTING';
-  
-  try {
-    cbSocket = new WebSocket('wss://advanced-trade-ws.coinbase.com');
-
-    cbSocket.on('open', () => {
-      console.log('[qwen-backend] upstream OPEN');
-      upstreamStatus = 'OPEN';
-      const subscribeMsg = {
-        type: 'subscribe',
-        product_ids: ['BTC-USD', 'ETH-USD', 'SOL-USD'],
-        channel: 'ticker'
-      };
-      cbSocket.send(JSON.stringify(subscribeMsg));
+function proxyCoinbase(cbPath, search, res) {
+  fetch('https://api.coinbase.com' + cbPath + search, { headers: { Accept: 'application/json' } })
+    .then(async function (r) {
+      const body = await r.text();
+      res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(body);
+    })
+    .catch(function (e) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e) }));
     });
-
-    cbSocket.on('message', (data) => {
-      const msg = data.toString();
-      for (const client of clients) {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(msg);
-        }
-      }
-    });
-
-    cbSocket.on('close', () => {
-      console.log('[qwen-backend] upstream CLOSED');
-      upstreamStatus = 'CLOSED';
-      setTimeout(connectUpstream, 5000);
-    });
-
-    cbSocket.on('error', (err) => {
-      console.error('[qwen-backend] upstream ERROR:', err.message);
-      upstreamStatus = 'ERROR';
-    });
-  } catch (err) {
-    console.error('[qwen-backend] Exception during connect:', err.message);
-    upstreamStatus = 'ERROR';
-    setTimeout(connectUpstream, 5000);
-  }
 }
 
-connectUpstream();
-
-const wss = new WebSocket.Server({ noServer: true });
-
-wss.on('connection', (ws) => {
-  clients.add(ws);
-  ws.on('close', () => clients.delete(ws));
-});
-
-server.on('upgrade', (request, socket, head) => {
-  const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
-  if (pathname === '/feed') {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
-  } else {
-    socket.destroy();
+const server = http.createServer(function (req, res) {
+  const u = new URL(req.url, 'http://localhost');
+  if (u.pathname === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, upstream: upstreamState }));
+    return;
   }
-});
-
-app.get('/api/health', (req, res) => {
-  res.json({
-    ok: true,
-    upstream: upstreamStatus,
-    clientCount: clients.size,
-    timestamp: new Date().toISOString()
+  if (u.pathname === '/api/tickers') { proxyCoinbase('/api/v3/brokerage/market/tickers', u.search, res); return; }
+  if (u.pathname === '/api/candles') { proxyCoinbase('/api/v3/brokerage/market/candles', u.search, res); return; }
+  let file = u.pathname === '/' ? 'qwen-watcher.html' : decodeURIComponent(u.pathname.replace(/^\/+/, ''));
+  if (file.indexOf('..') !== -1) { res.writeHead(400); res.end('bad path'); return; }
+  const fp = path.join(__dirname, file);
+  fs.readFile(fp, function (err, buf) {
+    if (err) {
+      const any = fs.readdirSync(__dirname).find(function (f) { return f.endsWith('.html'); });
+      if (any) {
+        fs.readFile(path.join(__dirname, any), function (e2, b2) {
+          if (e2) { res.writeHead(404); res.end('not found'); }
+          else { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(b2); }
+        });
+      } else { res.writeHead(404); res.end('Save qwen-watcher.html next to qwen-backend.js'); }
+      return;
+    }
+    const ct = fp.endsWith('.html') ? 'text/html' : 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': ct });
+    res.end(buf);
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`[qwen-backend] Server listening on port ${PORT}`);
+const wss = new WebSocketServer({ server, path: '/feed' });
+
+function connectUpstream() {
+  attempts++;
+  upstreamState = 'CONNECTING';
+  log('connecting ' + UPSTREAM + ' attempt ' + attempts);
+  upstream = new WebSocket(UPSTREAM);
+  upstream.onopen = function () {
+    attempts = 0;
+    upstreamState = 'OPEN';
+    log('upstream OPEN - subscribing ticker + heartbeats + market_trades');
+    upstream.send(JSON.stringify({ type: 'subscribe', product_ids: PRODUCTS, channel: 'ticker', timestamp: new Date().toISOString() }));
+    upstream.send(JSON.stringify({ type: 'subscribe', product_ids: PRODUCTS, channel: 'heartbeats', timestamp: new Date().toISOString() }));
+    upstream.send(JSON.stringify({ type: 'subscribe', product_ids: PRODUCTS, channel: 'market_trades', timestamp: new Date().toISOString() }));
+  };
+  upstream.onmessage = function (ev) {
+    const data = typeof ev.data === 'string' ? ev.data : ev.data.toString();
+    for (const client of wss.clients) {
+      if (client.readyState === 1) client.send(data);
+    }
+  };
+  upstream.onclose = function () {
+    upstreamState = 'CLOSED';
+    const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(attempts, 5)));
+    log('upstream CLOSED - retry in ' + delay + 'ms');
+    setTimeout(connectUpstream, delay);
+  };
+  upstream.onerror = function (e) { log('upstream ERROR ' + (e.message || 'unknown')); };
+}
+
+wss.on('connection', function (ws) {
+  log('frontend connected');
+  ws.send(JSON.stringify({ type: 'hello', service: 'qwen-backend', upstream: UPSTREAM, upstreamState: upstreamState }));
 });
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+setInterval(function () {
+  if (upstream && upstream.readyState === 1) upstream.ping();
+}, 20000);
+
+server.listen(PORT, function () {
+  log('QWEN backend ready - open http://localhost:' + PORT);
+  connectUpstream();
 });
