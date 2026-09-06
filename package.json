@@ -1,10 +1,12 @@
 {
   "name": "qwen-watcher",
-  "version": "3.2.0",
-  "description": "QWEN WATCHER - Multi-agent monitoring system",
+  "version": "1.0.0",
+  "description": "Qwen Watcher Dashboard",
   "main": "qwen-backend.js",
   "scripts": {
     "start": "node qwen-backend.js"
   },
-  "dependencies": {}
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }
