@@ -2137,3 +2137,26 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
   };
 })();
 </script>
+
+<script>
+(function connectPublisher() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+  pubWs.onopen = () => {
+    console.log('[PUBLISHER] Connected to backend');
+    setInterval(() => {
+      if (pubWs.readyState === WebSocket.OPEN && window.latestState) {
+        pubWs.send(JSON.stringify({
+          type: 'publisher_state',
+          data: window.latestState
+        }));
+      }
+    }, 3000);
+  };
+
+  pubWs.onclose = () => {
+    setTimeout(connectPublisher, 3000);
+  };
+})();
+</script>
