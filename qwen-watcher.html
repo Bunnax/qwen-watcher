@@ -1,0 +1,71 @@
+ cat > publisher-block.txt <<'PUB_EOF'
+<script>
+/* QWEN WATCHER Telegram publisher (additive tail module, V1).
+   Reads existing canonical frontend state ONLY. Validates sufficiency/freshness
+   before publishing. Computes NOTHING new. Sends qwen-state snapshots and
+   qwen-event edges over the EXISTING /feed socket. */
+(function () {
+  var lastSig = {};
+  var lastPlanSig = '';
+  function fresh(d, ms) { return d && d.lastUpdate != null && (Date.now() - d.lastUpdate) < ms; }
+  function snap(k) {
+    var d = marketData[k];
+    if (!d || d.price == null) return null;
+    var now = Date.now();
+    if (k === state.asset) {
+      var a = state.analysis;
+      if (!a) return null;
+      if (d.candles.length < 60) return null;
+      if (Feed.state !== 'ONLINE' && Feed.state !== 'REST') return null;
+      if (!fresh(d, 30000)) return null;
+      return { ts: now, asset: k, tf: state.tfId, price: d.price, pct: d.change24h == null ? null : d.change24h,
+        signal: a.signal, confidence: a.confidence, entryLow: a.entryLow, entryHigh: a.entryHigh, stop: a.stop, target: a.target,
+        regime: a.regime, strength: a.strength, volLabel: a.volLabel, momentum: a.momentum,
+        planStatus: (state.plan && state.plan.windows && state.plan.windows[0]) ? state.plan.windows[0].status : null,
+        dataQuality: 'ok' };
+    }
+    var w = d.watchSig;
+    if (!w || !w.signal) return null;
+    if (d.candles.length < 60) return null;
+    if (!fresh(d, 90000)) return null;
+    return { ts: now, asset: k, tf: state.tfId, price: d.price, pct: d.change24h == null ? null : d.change24h,
+      signal: w.signal, confidence: w.conf, entryLow: null, entryHigh: null, stop: null, target: null,
+      regime: null, strength: null, volLabel: null, momentum: null, planStatus: null, dataQuality: 'ok-partial' };
+  }
+  function publish() {
+    var ws = Feed.ws;
+    if (!ws || ws.readyState !== 1) return;
+    for (var i = 0; i < ASSET_KEYS.length; i++) {
+      var k = ASSET_KEYS[i];
+      var s = snap(k);
+      if (!s) continue;
+      try {
+        s.type = 'qwen-state'; s.v = 1; s.publisher = 'dashboard';
+        ws.send(JSON.stringify(s));
+        if (lastSig[k] && lastSig[k] !== s.signal) {
+          ws.send(JSON.stringify({ type: 'qwen-event', v: 1, ts: Date.now(), asset: k, event: 'signal-flip', from: lastSig[k], to: s.signal, confidence: s.confidence }));
+        }
+        lastSig[k] = s.signal;
+      } catch (e) { /* socket hiccup; next 5s cycle retries */ }
+    }
+  }
+  function watchPlan() {
+    var p = state.plan;
+    if (!p || !p.windows) return;
+    var sig = p.windows.map(function (w) { return w.status; }).join(',');
+    if (lastPlanSig && sig !== lastPlanSig) {
+      var inv = null;
+      for (var i = 0; i < p.windows.length; i++) if (p.windows[i].status === 'INVALIDATED') inv = p.windows[i];
+      var ws = Feed.ws;
+      if (inv && ws && ws.readyState === 1) {
+        try { ws.send(JSON.stringify({ type: 'qwen-event', v: 1, ts: Date.now(), asset: state.asset, event: 'window-invalidated', from: inv.dir, confidence: inv.confidence })); } catch (e) {}
+      }
+    }
+    lastPlanSig = sig;
+  }
+  setInterval(publish, 5000);
+  setInterval(watchPlan, 2000);
+})();
+</script>
+PUB_EOF
+
