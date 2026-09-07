@@ -79,7 +79,7 @@ async function candles(product, gran, limit) {
 const server = http.createServer(async function (req, res) {
   const u = new URL(req.url, 'http://localhost');
   if (u.pathname === '/api/health') { json(res, 200, { ok: true, upstream: upstreamState }); return; }
-  if (u.pathname === '/api/canonical') { json(res, 200, { publishers: publisherSockets.size, assets: Object.keys(CANON).map(function (k) { return { asset: k, lastPublish: CANON[k].lastPublish, state: CANON[k].state }; }) }); return; }
+  if (u.pathname === '/api/canonical') { json(res, 200, { publishers: publisherSockets.size, rejects: canonRejects, assets: Object.keys(CANON).map(function (k) { return { asset: k, lastPublish: CANON[k].lastPublish, state: CANON[k].state }; }) }); return; }
   if (u.pathname === '/api/tickers') {
     try { const j = await tickers(u.searchParams.get('product_id') || 'BTC-USD'); log('tickers ' + (u.searchParams.get('product_id') || 'BTC-USD') + ' via ' + j.source); json(res, 200, j); }
     catch (e) { json(res, e.status || 502, { error: String(e.message) }); }
@@ -108,7 +108,7 @@ const server = http.createServer(async function (req, res) {
       return;
     }
     const ct = fp.endsWith('.html') ? 'text/html' : 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': ct });
+    res.writeHead(200, ct === 'text/html' ? { 'Content-Type': ct, 'Cache-Control': 'no-store, must-revalidate' } : { 'Content-Type': ct });
     res.end(buf);
   });
 });
@@ -119,6 +119,7 @@ const wss = new WebSocketServer({ server, path: '/feed' });
 const CANON = {};
 PRODUCTS.forEach(function (p) { CANON[p.split('-')[0]] = { state: null, lastPublish: 0 }; });
 const publisherSockets = new Set();
+let canonRejects = 0;
 function numOk(x) { return typeof x === 'number' && isFinite(x); }
 function validateSnapshot(f) {
   if (!f || f.type !== 'qwen-state' || f.v !== 1) return null;
@@ -190,7 +191,7 @@ wss.on('connection', function (ws) {
     try { f = JSON.parse(data.toString()); } catch (e) { return; }
     if (f && f.type === 'qwen-state') {
       const v = validateSnapshot(f);
-      if (!v) return;
+      if (!v) { canonRejects++; return; }
       CANON[v.asset].state = v;
       CANON[v.asset].lastPublish = Date.now();
       publisherSockets.add(ws);

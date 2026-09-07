@@ -47,7 +47,7 @@ async function send(text) {
 
 function snapshotFor(arg) {
   const canon = deps.getCanonical();
-  const key = Object.keys(canon).find(function (k) { return arg ? k.indexOf(arg) === 0 : false; });
+  const key = Object.keys(canon).find(function (k) { return arg ? k.indexOf(arg) === 0 : !!canon[k].state; });
   return key ? canon[key] : null;
 }
 function fmtSnapFull(slot) {
