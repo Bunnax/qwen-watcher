@@ -79,6 +79,7 @@ async function candles(product, gran, limit) {
 const server = http.createServer(async function (req, res) {
   const u = new URL(req.url, 'http://localhost');
   if (u.pathname === '/api/health') { json(res, 200, { ok: true, upstream: upstreamState }); return; }
+  if (u.pathname === '/api/canonical') { json(res, 200, { publishers: publisherSockets.size, assets: Object.keys(CANON).map(function (k) { return { asset: k, lastPublish: CANON[k].lastPublish, state: CANON[k].state }; }) }); return; }
   if (u.pathname === '/api/tickers') {
     try { const j = await tickers(u.searchParams.get('product_id') || 'BTC-USD'); log('tickers ' + (u.searchParams.get('product_id') || 'BTC-USD') + ' via ' + j.source); json(res, 200, j); }
     catch (e) { json(res, e.status || 502, { error: String(e.message) }); }
@@ -114,6 +115,45 @@ const server = http.createServer(async function (req, res) {
 
 const wss = new WebSocketServer({ server, path: '/feed' });
 
+/* ---- CANONICAL SNAPSHOT STORE (owned by backend) + Telegram wiring ---- */
+const CANON = {};
+PRODUCTS.forEach(function (p) { CANON[p.split('-')[0]] = { state: null, lastPublish: 0 }; });
+const publisherSockets = new Set();
+function numOk(x) { return typeof x === 'number' && isFinite(x); }
+function validateSnapshot(f) {
+  if (!f || f.type !== 'qwen-state' || f.v !== 1) return null;
+  if (typeof f.asset !== 'string' || !CANON[f.asset]) return null;
+  if (f.dataQuality !== 'ok' && f.dataQuality !== 'ok-partial') return null;
+  if (!numOk(f.ts) || Date.now() - f.ts > 120000) return null;
+  if (!numOk(f.price)) return null;
+  if (typeof f.signal !== 'string' || ['BUY', 'SELL', 'WAIT'].indexOf(f.signal) === -1) return null;
+  if (!numOk(f.confidence) || f.confidence < 0 || f.confidence > 100) return null;
+  if (typeof f.tf !== 'string') return null;
+  const optNum = function (x) { return x === null || numOk(x); };
+  if (!optNum(f.entryLow) || !optNum(f.entryHigh) || !optNum(f.stop) || !optNum(f.target)) return null;
+  if (f.pct !== null && !numOk(f.pct)) return null;
+  if (f.regime !== null && typeof f.regime !== 'string') return null;
+  return f;
+}
+function validateEvent(f) {
+  if (!f || f.type !== 'qwen-event' || f.v !== 1) return null;
+  if (typeof f.asset !== 'string' || !CANON[f.asset]) return null;
+  if (['signal-flip', 'window-invalidated'].indexOf(f.event) === -1) return null;
+  if (!numOk(f.ts) || Date.now() - f.ts > 120000) return null;
+  return f;
+}
+let TG = null;
+try {
+  TG = require('./qwen-telegram.js');
+  TG.init({
+    getCanonical: function () { return CANON; },
+    getUpstream: function () { return upstreamState; },
+    getPublishers: function () { return publisherSockets.size; },
+    log: log
+  });
+} catch (e) { TG = null; log('telegram module load failed (app continues): ' + e.message); }
+
+
 function connectUpstream() {
   attempts++;
   upstreamState = 'CONNECTING';
@@ -145,6 +185,23 @@ function connectUpstream() {
 wss.on('connection', function (ws) {
   log('frontend connected');
   ws.send(JSON.stringify({ type: 'hello', service: 'qwen-backend', upstream: UPSTREAM, upstreamState: upstreamState }));
+  ws.on('message', function (data) {
+    let f = null;
+    try { f = JSON.parse(data.toString()); } catch (e) { return; }
+    if (f && f.type === 'qwen-state') {
+      const v = validateSnapshot(f);
+      if (!v) return;
+      CANON[v.asset].state = v;
+      CANON[v.asset].lastPublish = Date.now();
+      publisherSockets.add(ws);
+    } else if (f && f.type === 'qwen-event') {
+      const v = validateEvent(f);
+      if (!v) return;
+      publisherSockets.add(ws);
+      if (TG) { try { TG.onEvent(v); } catch (e) { log('telegram dispatch error: ' + e.message); } }
+    }
+  });
+  ws.on('close', function () { publisherSockets.delete(ws); });
 });
 
 setInterval(function () {
