@@ -16,8 +16,18 @@ function log(m) { if (deps) deps.log('telegram: ' + m); }
 function age(ts) { const s = Math.floor((Date.now() - ts) / 1000); return s < 60 ? s + 's' : Math.floor(s / 60) + 'm'; }
 function pair(a) { return a + '/USD'; }
 
+let STORE = null, TG2 = null;
+function v2Init(d) {
+  try {
+    STORE = require('./qwen-tg-store.js');
+    STORE.init({ log: log });
+    TG2 = require('./qwen-tg-v2.js');
+    TG2.init({ getCanonical: d.getCanonical, getPublishers: d.getPublishers, log: log, send: sendToChat }, STORE);
+  } catch (e) { STORE = null; TG2 = null; log('telegram v2 modules load failed (v1 continues): ' + e.message); }
+}
 function init(d) {
   deps = d;
+  v2Init(d);
   if (!TOKEN) { d.log('telegram: disabled (TELEGRAM_BOT_TOKEN not set) - app continues normally'); return; }
   enabled = true;
   d.log('telegram: enabled | chats=' + chats.size + ' | subscriptions are IN-MEMORY and do NOT survive Render restarts');
@@ -65,6 +75,7 @@ function fmtSnapFull(slot) {
 }
 
 function handle(msg) {
+  if (TG2) { try { if (TG2.handleCommand(msg, function (t) { send(t); })) return; } catch (e) { log('v2 command error: ' + e.message); } }
   if (!msg || !msg.text) return;
   const chatId = String(msg.chat.id);
   const parts = msg.text.trim().split(/\s+/);
@@ -73,14 +84,15 @@ function handle(msg) {
   let reply = '';
   if (cmd === '/start') {
     chats.add(chatId);
+    try { if (TG2) TG2.bind(msg); } catch (e) { log('v2 bind error: ' + e.message); }
     log('chat bound ' + chatId + ' (in-memory, session-only)');
-    reply = 'QWEN WATCHER bound to this chat (session-only subscription).\nCommands: /status /price /signal /regime /alerts /help';
+    reply = 'QWEN WATCHER bound to this chat (session-only subscription).\nCommands: /status /price /signal /regime /alerts /watch /confidence /settings /digest /help';
     send(reply);
     return;
   }
   if (!chats.has(chatId)) { send('Unauthorized chat. Send /start first.'); return; }
   const canon = deps.getCanonical();
-  if (cmd === '/help') reply = 'QWEN WATCHER bot\n/status - feed + publisher + signal overview\n/price [BTC|ETH|SOL]\n/signal [pair]\n/regime [pair]\n/alerts on|off|signals|levels\nSubscriptions live in memory only; they reset on Render restart.';
+  if (cmd === '/help') reply = 'QWEN WATCHER bot\n/status - feed + publisher + signal overview\n/price [BTC|ETH|SOL]\n/signal [pair]\n/regime [pair]\n/alerts on|off|signals|levels\nSubscriptions and preferences are persisted (Upstash Redis) when available.\n/watch BTC|ETH|SOL, /unwatch, /watchlist, /confidence N, /settings, /digest on|off|time HH:MM|timezone TZ.';
   else if (cmd === '/status') {
     const lines = ['QWEN WATCHER STATUS', 'Coinbase upstream: ' + deps.getUpstream(), 'Dashboard publishers connected: ' + deps.getPublishers(), 'Alerts: signals=' + (alertSignals ? 'on' : 'off') + ' minConf=' + MIN_CONF];
     Object.keys(canon).forEach(function (k) {
@@ -89,7 +101,7 @@ function handle(msg) {
     });
     if (deps.getPublishers() === 0) lines.push('note: no dashboard session publishing - snapshots frozen until a tab reconnects');
     if (lastError) lines.push('last telegram error: ' + lastError);
-    reply = lines.join('\n');
+    reply = lines.join('\n') + (TG2 ? '\n' + TG2.statusLines() : '');
   } else if (cmd === '/price') {
     const slot = arg ? snapshotFor(arg) : null;
     reply = (!slot || !slot.state) ? 'No canonical price yet for ' + (arg || 'asset') + '.' : pair(slot.state.asset) + ': ' + Number(slot.state.price).toLocaleString('en-US') + (slot.state.pct != null ? ' | 24h ' + Number(slot.state.pct).toFixed(2) + '%' : '') + ' | age ' + age(slot.lastPublish);
@@ -110,7 +122,17 @@ function handle(msg) {
   send(reply);
 }
 
+async function sendToChat(chatId, text) {
+  if (!enabled) return false;
+  try {
+    const r = await fetch('https://api.telegram.org/bot' + TOKEN + '/sendMessage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: text, disable_web_page_preview: true }) });
+    const j = await r.json();
+    if (j && j.ok) { lastSend = Date.now(); return true; }
+    lastError = String(j && j.description); log('sendToChat failed: ' + lastError); return false;
+  } catch (e) { lastError = String(e.message); log('sendToChat failed: ' + e.message); return false; }
+}
 function onEvent(v) {
+  if (TG2) { try { TG2.onEvent(v, { sendTo: sendToChat }); return; } catch (e) { log('v2 dispatch error: ' + e.message); } }
   if (!enabled || !alertSignals || chats.size === 0) return;
   const now = Date.now();
   try {
