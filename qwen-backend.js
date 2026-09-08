@@ -1,3 +1,15 @@
+
+const PERF = require('./qwen-signal-performance.js');
+const safeLog = typeof log === 'function' ? log : console.log;
+PERF.init({ 
+  log: safeLog, 
+  broadcast: function (obj) { 
+    if (typeof wss !== 'undefined' && wss.clients) {
+      for (const c of wss.clients) if (c.readyState === 1) c.send(JSON.stringify(obj)); 
+    }
+  } 
+});
+
 // qwen-backend.js v2 - relay + multi-source market-data proxy
 // browser -> THIS backend (/feed WS + /api REST) -> Coinbase/Exchange/Bitstamp -> real data
 const http = require('http');
@@ -115,8 +127,7 @@ const server = http.createServer(async function (req, res) {
 });
 
 const wss = new WebSocketServer({ server, path: '/feed' });
-const PERF = require('./qwen-signal-performance.js');
-PERF.init({ log: log, broadcast: function (obj) { for (const c of wss.clients) if (c.readyState === 1) c.send(JSON.stringify(obj)); } });
+
 PERF.onClose(function (rec) { try { const tm = require('./qwen-telegram.js'); const v2 = tm.v2 && tm.v2(); if (v2 && v2.notifyClosed) v2.notifyClosed(rec.asset, PERF.closedText(rec)); } catch (e) {} });
 
 /* ---- CANONICAL SNAPSHOT STORE (owned by backend) + Telegram wiring ---- */
