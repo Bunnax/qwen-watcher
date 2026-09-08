@@ -44,7 +44,7 @@ function digestText(rec) {
 function handleCommand(msg, reply) {
   const parts = String(msg.text || '').trim().split(/\s+/);
   const cmd = (parts[0] || '').toLowerCase();
-  if (['/watch', '/unwatch', '/watchlist', '/confidence', '/settings', '/digest'].indexOf(cmd) === -1) return false;
+  if (['/watch', '/unwatch', '/watchlist', '/confidence', '/settings', '/digest', '/alerts'].indexOf(cmd) === -1) return false;
   run(msg, parts, reply).catch(function (e) { log('v2 command error: ' + e.message); reply('Command failed: ' + e.message); });
   return true;
 }
@@ -62,6 +62,19 @@ async function run(msg, parts, reply) {
     const r = await store.updateChat(id, cmd === '/watch' ? { addAssets: [a] } : { remAssets: [a] });
     log('telegram: preference updated (' + cmd + ' ' + a + ') id=' + id);
     reply(savedText(r, cmd === '/watch' ? a + ' added to watchlist' : a + ' removed from watchlist'));
+    return;
+  }
+  if (cmd === '/alerts') {
+    const sub = (parts[1] || '').toLowerCase();
+    let patchA = null, label = '';
+    if (sub === 'on') { patchA = { signalFlips: true, windowInvalidated: true }; label = 'Alerts ON'; }
+    else if (sub === 'off') { patchA = { signalFlips: false, windowInvalidated: false }; label = 'Alerts OFF'; }
+    else if (sub === 'signals') { patchA = { signalFlips: !rec.alerts.signalFlips }; label = 'Signal alerts ' + (!rec.alerts.signalFlips ? 'ON' : 'OFF'); }
+    else if (sub === 'levels') { patchA = { levels: !rec.alerts.levels }; label = 'Level alerts ' + (!rec.alerts.levels ? 'ON' : 'OFF'); }
+    else { reply('Usage: /alerts on|off|signals|levels'); return; }
+    const r = await store.updateChat(id, { alerts: patchA });
+    log('telegram: preference updated (alerts ' + sub + ') id=' + id);
+    reply(savedText(r, label));
     return;
   }
   if (cmd === '/watchlist') { reply('Watchlist: ' + (rec.subscribedAssets.join(', ') || '(none)')); return; }
