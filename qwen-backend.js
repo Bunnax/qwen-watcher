@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 10000;
 let PERF;
 try {
   PERF = require('./qwen-signal-performance.js');
-  PERF.init({
+  if (PERF) PERF.init({
     log: function (...args) { console.log('[PERF]', ...args); },
     broadcast: function (obj) {
       if (wss && wss.clients) {
@@ -40,7 +40,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/performance') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     const data = (PERF && typeof PERF.snapshotJSON === 'function') 
-      ? PERF.snapshotJSON() 
+      ? (PERF ? PERF.snapshotJSON() : { type: 'qwen-perf', v: 1, ts: Date.now(), persisted: false, open: [], closed: [], summary: {}, breakdowns: {} }) 
       : { status: 'ok', open: [], closed: [] };
     res.end(JSON.stringify(data));
     return;
