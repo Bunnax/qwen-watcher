@@ -101,7 +101,9 @@ function onState(frame) {
 
   const key = `${frame.asset}|${frame.tf}`;
   const now = frame.ts || getNow();
-  const dir = frame.signal.toUpperCase();
+  let dir = (frame.signal || '').toUpperCase();
+  if (dir.includes('BUY')) dir = 'BUY';
+  else if (dir.includes('SELL')) dir = 'SELL';
 
   if (dir !== 'BUY' && dir !== 'SELL') {
     if (openSignals.has(key)) {
