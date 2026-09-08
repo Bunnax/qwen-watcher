@@ -14,6 +14,7 @@ const TF_EXPIRY_MS = {
 let logger = console.log;
 let broadcaster = function () {};
 let getNow = function () { return Date.now(); };
+const closeListeners = [];
 
 const openSignals = new Map();
 const closedSignals = [];
@@ -24,6 +25,12 @@ function init(opts) {
     if (typeof opts.log === 'function') logger = opts.log;
     if (typeof opts.broadcast === 'function') broadcaster = opts.broadcast;
     if (typeof opts.now === 'function') getNow = opts.now;
+  }
+}
+
+function onClose(fn) {
+  if (typeof fn === 'function') {
+    closeListeners.push(fn);
   }
 }
 
@@ -52,6 +59,14 @@ function closeSignal(rec, reason, exitPrice, exitTs) {
   closedSignals.push(rec);
 
   broadcaster({ type: 'SIGNAL_CLOSED', signal: rec });
+
+  for (const listener of closeListeners) {
+    try {
+      listener(rec);
+    } catch (e) {
+      logger('onClose listener error:', e.message);
+    }
+  }
 }
 
 function checkExpiry(rec, currentTs, price) {
@@ -158,15 +173,22 @@ function onTrade(asset, price, ts) {
   }
 }
 
+function closedText(rec) {
+  const sign = rec.pnlPct > 0 ? '+' : '';
+  return `[SIGNAL CLOSED] ${rec.asset} (${rec.timeframe}) ${rec.direction}\nReason: ${rec.closeReason}\nP&L: ${sign}${rec.pnlPct.toFixed(2)}%\nEntry: ${rec.entryPrice} -> Exit: ${rec.exitPrice}`;
+}
+
 function summary() {
   const total = closedSignals.length;
   let wins = 0;
   let losses = 0;
+  let breakevens = 0;
   let totalPnl = 0;
 
   for (const r of closedSignals) {
     if (r.result === 'WIN') wins++;
     else if (r.result === 'LOSS') losses++;
+    else breakevens++;
     totalPnl += r.pnlPct;
   }
 
@@ -174,31 +196,60 @@ function summary() {
   const avgPnl = total > 0 ? Math.round((totalPnl / total) * 100) / 100 : 0;
 
   return {
+    total: total + openSignals.size,
     closed: total,
     open: openSignals.size,
     wins: wins,
     losses: losses,
+    breakevens: breakevens,
     winRate: winRate,
-    averagePnl: avgPnl
+    averagePnl: avgPnl,
+    totalPnl: Math.round(totalPnl * 100) / 100,
+    profitFactor: null
   };
 }
 
 function snapshotJSON() {
   return {
     persisted: false,
-    openCount: openSignals.size,
-    closedCount: closedSignals.length,
-    summary: summary()
+    summary: summary(),
+    open: Array.from(openSignals.values()).map(o => ({
+      openedAt: o.openedTs,
+      direction: o.direction,
+      asset: o.asset,
+      timeframe: o.timeframe,
+      confidence: o.confidence,
+      livePnl: calculatePnl(o.direction, o.entryPrice, latestPrices.get(o.asset)?.price || o.entryPrice)
+    })),
+    closed: closedSignals.map(c => ({
+      openedAt: c.openedTs,
+      direction: c.direction,
+      asset: c.asset,
+      timeframe: c.timeframe,
+      entryPrice: c.entryPrice,
+      exitPrice: c.exitPrice,
+      durationMs: (c.exitTs || getNow()) - c.openedTs,
+      confidence: c.confidence,
+      pnlPct: c.pnlPct,
+      closeReason: c.closeReason
+    })),
+    breakdowns: {
+      direction: {},
+      asset: {},
+      confidence: {}
+    }
   };
 }
 
 module.exports = {
   init: init,
+  onClose: onClose,
   onState: onState,
   onTrade: onTrade,
   debugTick: debugTick,
   summary: summary,
   snapshotJSON: snapshotJSON,
+  closedText: closedText,
   _open: openSignals,
   _closed: closedSignals
 };
