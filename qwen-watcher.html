@@ -88,7 +88,14 @@ tailwind.config = {
   #debugLog div{ white-space:pre-wrap; word-break:break-word; }
   pre.codebox{ white-space:pre; font-size:9.5px; line-height:1.5; }
 </style>
-</head>
+<script>
+  function getWsUrl() {
+    if (window.location.protocol === 'file:') return 'ws://localhost:10000/feed';
+    var loc = window.location;
+    var proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+    return proto + '//' + loc.host + '/feed';
+  }
+</script></head>
 <body class="text-slate-200 font-disp antialiased relative">
 
 <div id="simBanner" class="hidden relative z-50 bg-bear/10 border-b border-bear/40 text-bear text-[11px] font-mono tracking-wider px-4 py-2 text-center">
@@ -669,7 +676,7 @@ tailwind.config = {
 <script>
 (function connectPublisher() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  const pubWs = new WebSocket(getWsUrl());
 
   pubWs.onopen = () => {
     console.log('[PUBLISHER] Connected to backend');
@@ -692,7 +699,7 @@ tailwind.config = {
 <script>
 (function connectPublisher() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  const pubWs = new WebSocket(getWsUrl());
 
   pubWs.onopen = () => {
     console.log('[PUBLISHER] Connected to backend');
