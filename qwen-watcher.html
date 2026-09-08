@@ -2251,7 +2251,7 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
     var tb = document.getElementById('histRows'); if (tb) tb.innerHTML = rows();
     var pp = document.getElementById('perfPanel'); if (pp) pp.innerHTML = '<span class="ptitle">PERFORMANCE GRADER</span><div class="mt-2">' + panel() + '</div>';
   }
-  var host = document.getElementById('histBody');
+  var host = document.getElementById('histBody') || document.querySelector('[id*="hist"]') || document.body;
   if (host && !document.getElementById('perfPanel')) host.insertAdjacentHTML('afterend', '<div id="perfPanel" class="px-4 sm:px-5 py-3.5 border-t" style="border-color:var(--edge)"></div>');
   setInterval(function () {
     if (typeof Feed === 'undefined' || !Feed.ws || Feed.ws === attached) return;
