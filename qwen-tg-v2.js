@@ -216,4 +216,15 @@ function statusLines() {
     'Persistence: ' + st + (st === 'DEGRADED' && store.lastError() ? ' (' + store.lastError() + ')' : '')].join('\n');
 }
 
-module.exports = { init: init, handleCommand: handleCommand, onEvent: onEvent, bind: bind, statusLines: statusLines };
+async function notifyClosed(asset, text) {
+  try {
+    const ids = await store.listChats();
+    for (const id of ids) {
+      const rec = await store.loadChat(id);
+      if (!rec || rec.subscribedAssets.indexOf(asset) === -1) continue;
+      await deps.send(id, text);
+    }
+    log('telegram: closure notification sent for ' + asset);
+  } catch (e) { log('telegram: closure notify error: ' + e.message); }
+}
+module.exports = { init: init, handleCommand: handleCommand, onEvent: onEvent, bind: bind, statusLines: statusLines, notifyClosed: notifyClosed };

@@ -78,6 +78,7 @@ async function candles(product, gran, limit) {
 
 const server = http.createServer(async function (req, res) {
   const u = new URL(req.url, 'http://localhost');
+  if (u.pathname === '/api/performance') { json(res, 200, PERF.snapshotJSON()); return; }
   if (u.pathname === '/api/health') { json(res, 200, { ok: true, upstream: upstreamState }); return; }
   if (u.pathname === '/api/canonical') { json(res, 200, { publishers: publisherSockets.size, rejects: canonRejects, assets: Object.keys(CANON).map(function (k) { return { asset: k, lastPublish: CANON[k].lastPublish, state: CANON[k].state }; }) }); return; }
   if (u.pathname === '/api/tickers') {
@@ -114,6 +115,9 @@ const server = http.createServer(async function (req, res) {
 });
 
 const wss = new WebSocketServer({ server, path: '/feed' });
+const PERF = require('./qwen-signal-performance.js');
+PERF.init({ log: log, broadcast: function (obj) { for (const c of wss.clients) if (c.readyState === 1) c.send(JSON.stringify(obj)); } });
+PERF.onClose(function (rec) { try { const tm = require('./qwen-telegram.js'); const v2 = tm.v2 && tm.v2(); if (v2 && v2.notifyClosed) v2.notifyClosed(rec.asset, PERF.closedText(rec)); } catch (e) {} });
 
 /* ---- CANONICAL SNAPSHOT STORE (owned by backend) + Telegram wiring ---- */
 const CANON = {};
@@ -169,6 +173,7 @@ function connectUpstream() {
     upstream.send(JSON.stringify({ type: 'subscribe', product_ids: PRODUCTS, channel: 'market_trades', timestamp: new Date().toISOString() }));
   };
   upstream.onmessage = function (ev) {
+  try { const um = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString()); if (um && um.channel === 'market_trades') { for (const e of um.events || []) for (const t of e.trades || []) { const p = parseFloat(t.price); if (isFinite(p)) PERF.onTrade(String(t.product_id || '').split('-')[0], p, Date.now()); } } } catch (e) {}
     const data = typeof ev.data === 'string' ? ev.data : ev.data.toString();
     for (const client of wss.clients) {
       if (client.readyState === 1) client.send(data);
@@ -193,6 +198,7 @@ wss.on('connection', function (ws) {
       const v = validateSnapshot(f);
       if (!v) { canonRejects++; return; }
       CANON[v.asset].state = v;
+      try { PERF.onState(v); } catch (e) {}
       CANON[v.asset].lastPublish = Date.now();
       publisherSockets.add(ws);
     } else if (f && f.type === 'qwen-event') {

@@ -1786,6 +1786,7 @@ function pushHistory(row){
   renderHistory();
 }
 function renderHistory(){
+  if (window.QWEN_LEDGER_UI) return;
   const rows=state.history;
   $('histTfNote').textContent = '· '+ASSETS[state.asset].pair+' · '+state.tfId+' SESSION';
   if(!rows.length){
@@ -1807,6 +1808,7 @@ function renderHistory(){
   }).join('');
 }
 function backfillHistory(){
+  if (window.QWEN_LEDGER_UI) return;
   const tf = tfCurrent();
   const candles = marketData[state.asset].candles;
   const winC = Math.max(3, Math.round(WINDOW_MIN[state.tfId]*60/tf.sec));
@@ -2201,6 +2203,63 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
   }
   setInterval(publish, 5000);
   setInterval(watchPlan, 2000);
+})();
+</script>
+
+<script>
+/* QWEN ledger UI (additive): renders canonical performance state from qwen-perf frames. */
+(function () {
+  window.QWEN_LEDGER_UI = true;
+  var perf = null, attached = null;
+  function hhmm(ms) { return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); }
+  function dur(ms) { var m = Math.round(ms / 60000); return m < 60 ? m + 'm' : Math.floor(m / 60) + 'h' + (m % 60 ? (m % 60) + 'm' : ''); }
+  function pnlCell(v, open) { if (v == null) return '<span class="text-mut">—</span>'; var c = v > 0 ? 'text-bull' : v < 0 ? 'text-bear' : 'text-mut'; return '<span class="' + c + (open ? ' pulse' : '') + '">' + (v > 0 ? '+' : '') + v.toFixed(2) + '%</span>'; }
+  function rows() {
+    if (!perf) return '';
+    var r = '';
+    (perf.open || []).forEach(function (o) {
+      r += '<tr class="border-b" style="border-color:var(--edge)"><td class="px-4 sm:px-5 py-2.5 text-slate-400">' + hhmm(o.openedAt) + '</td>' +
+        '<td class="py-2.5"><span class="text-[10px] font-semibold tracking-wider px-2 py-[3px] rounded-md border border-sky-500/30 bg-sky-500/10 text-sky-300">OPEN ' + o.direction + '</span></td>' +
+        '<td class="py-2.5 text-slate-200">' + o.asset + '/USD <span class="text-mut">' + o.timeframe + '</span></td>' +
+        '<td class="py-2.5 text-slate-300">' + o.confidence + '%</td>' +
+        '<td class="py-2.5 pr-4 sm:pr-5 text-right">' + pnlCell(o.livePnl, true) + '</td></tr>';
+    });
+    (perf.closed || []).forEach(function (c) {
+      var col = c.direction === 'BUY' ? 'border-bull/25 bg-bull/10 text-bull' : 'border-bear/25 bg-bear/10 text-bear';
+      r += '<tr class="border-b" style="border-color:var(--edge)"><td class="px-4 sm:px-5 py-2.5 text-slate-400">' + hhmm(c.openedAt) + '</td>' +
+        '<td class="py-2.5"><span class="text-[10px] font-semibold tracking-wider px-2 py-[3px] rounded-md border ' + col + '">' + c.direction + '</span></td>' +
+        '<td class="py-2.5 text-slate-200">' + c.asset + '/USD <span class="text-mut">' + c.timeframe + '</span><br><span class="text-[9px] text-mut">' + c.entryPrice + ' → ' + c.exitPrice + ' · ' + dur(c.durationMs) + '</span></td>' +
+        '<td class="py-2.5 text-slate-300">' + c.confidence + '%</td>' +
+        '<td class="py-2.5 pr-4 sm:pr-5 text-right">' + pnlCell(c.pnlPct, false) + '<br><span class="text-[9px] text-mut">' + c.closeReason + '</span></td></tr>';
+    });
+    return r || '<tr><td colspan="5" class="px-5 py-8 text-center text-mut text-[11px] tracking-widest">NO SIGNALS RECORDED YET</td></tr>';
+  }
+  function panel() {
+    if (!perf || !perf.summary) return '';
+    var s = perf.summary;
+    var g = '<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">' +
+      ['TOTAL ' + s.total, 'OPEN ' + s.open, 'CLOSED ' + s.closed, 'WIN RATE ' + s.winRate + '%', 'W ' + s.wins + ' / L ' + s.losses + ' / BE ' + s.breakevens, 'AVG P&L ' + s.averagePnl + '%', 'TOTAL P&L ' + s.totalPnl + '%', 'PF ' + (s.profitFactor == null ? '∞' : s.profitFactor)].map(function (x) { return '<div class="border border-white/[0.07] rounded-lg px-2 py-1.5 bg-white/[0.02]">' + x + '</div>'; }).join('') + '</div>';
+    var bd = '';
+    ['confidence', 'asset', 'direction'].forEach(function (k) {
+      var m = perf.breakdowns[k]; if (!m) return;
+      bd += '<div class="mt-2"><span class="text-[8.5px] font-mono tracking-widest text-mut">BY ' + k.toUpperCase() + '</span><div class="flex flex-wrap gap-1.5 mt-1">' +
+        Object.keys(m).map(function (key) { return '<span class="text-[9px] font-mono border border-white/10 rounded px-1.5 py-[2px]">' + key + ': n' + m[key].n + ' wr' + m[key].winRate + '% avg' + m[key].avgPnl + '%</span>'; }).join('') + '</div></div>';
+    });
+    return g + bd + '<div class="text-[8.5px] font-mono text-mut/70 mt-2">HYPOTHETICAL SIGNAL P&L % — NOT PORTFOLIO RETURN · persisted: ' + (perf.persisted ? 'yes' : 'session-only') + '</div>';
+  }
+  function render() {
+    var tb = document.getElementById('histRows'); if (tb) tb.innerHTML = rows();
+    var pp = document.getElementById('perfPanel'); if (pp) pp.innerHTML = '<span class="ptitle">PERFORMANCE GRADER</span><div class="mt-2">' + panel() + '</div>';
+  }
+  var host = document.getElementById('histBody');
+  if (host && !document.getElementById('perfPanel')) host.insertAdjacentHTML('afterend', '<div id="perfPanel" class="px-4 sm:px-5 py-3.5 border-t" style="border-color:var(--edge)"></div>');
+  setInterval(function () {
+    if (typeof Feed === 'undefined' || !Feed.ws || Feed.ws === attached) return;
+    attached = Feed.ws;
+    attached.addEventListener('message', function (ev) {
+      try { var m = JSON.parse(ev.data); if (m && m.type === 'qwen-perf') { perf = m; render(); } } catch (e) {}
+    });
+  }, 2000);
 })();
 </script>
 </body>

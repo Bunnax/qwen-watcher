@@ -167,4 +167,4 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 
-module.exports = { init: init, onEvent: onEvent };
+module.exports = { init: init, onEvent: onEvent , v2: function () { return TG2; } };
