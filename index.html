@@ -1781,10 +1781,24 @@ function renderCountdown(){
   bar.style.background = DIR_META[w.dir].color;
 }
 function pushHistory(row){
+  // History is event-based, not evaluation-based. The same window can be
+  // evaluated repeatedly as prices update, but it must be recorded only once.
+  const historyKey = row.historyKey || [
+    state.asset,
+    state.tfId,
+    row.time,
+    row.signal,
+    row.result
+  ].join('|');
+
+  if(state.history.some(r => r && r._historyKey === historyKey)) return false;
+
+  row._historyKey = historyKey;
   state.history.unshift(row);
   if(state.history.length>14) state.history.pop();
   Stores[state.asset].history=state.history;
   renderHistory();
+  return true;
 }
 function renderHistory(){
   const rows=state.history;
@@ -1919,13 +1933,28 @@ function refreshAnalysis(manual){
   }
 }
 function evaluateWindow(w){
+  // evaluateWindow may be reached from the 1s UI loop. Never record the same
+  // window more than once.
+  if(w._historyRecorded) return false;
+
   let result='Closed';
   if(w.invalidated||w.status==='INVALIDATED') result='Invalidated';
   else if(state.analysis){
     if(w.dir==='BUY' && w.min!=null && w.min<state.analysis.stop) result='Invalidated';
     if(w.dir==='SELL' && w.max!=null && w.max>state.analysis.stop) result='Invalidated';
   }
-  pushHistory({ time:w.start, signal:w.dir, price:w.entryPrice||state.shownPrice||0, confidence:w.confidence, result });
+
+  const recorded = pushHistory({
+    time:w.start,
+    signal:w.dir,
+    price:w.entryPrice||state.shownPrice||0,
+    confidence:w.confidence,
+    result,
+    historyKey:[state.asset,state.tfId,w.start,w.dir].join('|')
+  });
+
+  if(recorded) w._historyRecorded=true;
+  return recorded;
 }
 
 Bus.on('ticker', key=>{

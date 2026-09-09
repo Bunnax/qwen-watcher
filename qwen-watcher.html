@@ -1780,10 +1780,24 @@ function renderCountdown(){
   bar.style.background = DIR_META[w.dir].color;
 }
 function pushHistory(row){
+  // History is event-based, not evaluation-based. The same window can be
+  // evaluated repeatedly as prices update, but it must be recorded only once.
+  const historyKey = row.historyKey || [
+    state.asset,
+    state.tfId,
+    row.time,
+    row.signal,
+    row.result
+  ].join('|');
+
+  if(state.history.some(r => r && r._historyKey === historyKey)) return false;
+
+  row._historyKey = historyKey;
   state.history.unshift(row);
   if(state.history.length>14) state.history.pop();
   Stores[state.asset].history=state.history;
   renderHistory();
+  return true;
 }
 function renderHistory(){
   if (window.QWEN_LEDGER_UI) return;
@@ -1919,13 +1933,28 @@ function refreshAnalysis(manual){
   }
 }
 function evaluateWindow(w){
+  // evaluateWindow may be reached from the 1s UI loop. Never record the same
+  // window more than once.
+  if(w._historyRecorded) return false;
+
   let result='Closed';
   if(w.invalidated||w.status==='INVALIDATED') result='Invalidated';
   else if(state.analysis){
     if(w.dir==='BUY' && w.min!=null && w.min<state.analysis.stop) result='Invalidated';
     if(w.dir==='SELL' && w.max!=null && w.max>state.analysis.stop) result='Invalidated';
   }
-  pushHistory({ time:w.start, signal:w.dir, price:w.entryPrice||state.shownPrice||0, confidence:w.confidence, result });
+
+  const recorded = pushHistory({
+    time:w.start,
+    signal:w.dir,
+    price:w.entryPrice||state.shownPrice||0,
+    confidence:w.confidence,
+    result,
+    historyKey:[state.asset,state.tfId,w.start,w.dir].join('|')
+  });
+
+  if(recorded) w._historyRecorded=true;
+  return recorded;
 }
 
 Bus.on('ticker', key=>{
@@ -2093,9 +2122,21 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
    logs send/skip reasons into the diagnostics drawer via dbg(). */
 (function () {
   var lastSig = {};
+  var signalGeneration = {};
   var lastPlanSig = '';
   var lastSkipLog = {};
   var announced = {};
+
+  function stableSignalId(asset, tf, signal) {
+    var key = asset + '|' + tf;
+    var previous = lastSig[key];
+
+    if (previous !== signal) {
+      signalGeneration[key] = (signalGeneration[key] || 0) + 1;
+    }
+
+    return asset + '|' + tf + '|' + signal + '|' + (signalGeneration[key] || 1);
+  }
   function fresh(d, ms) { return d && d.lastUpdate != null && (Date.now() - d.lastUpdate) < ms; }
   function skip(k, why) {
     var now = Date.now();
@@ -2129,7 +2170,7 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
       if (d.candles.length < 60) return null;
       if (Feed.state !== 'ONLINE' && Feed.state !== 'REST') return null;
       if (!fresh(d, 30000)) return null;
-      return { ts: now, asset: k, tf: state.tfId, price: d.price, pct: d.change24h == null ? null : d.change24h,
+      return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, a.signal), price: d.price, pct: d.change24h == null ? null : d.change24h,
         signal: a.signal, confidence: a.confidence, entryLow: a.entryLow, entryHigh: a.entryHigh, stop: a.stop, target: a.target,
         regime: a.regime, strength: a.strength, volLabel: a.volLabel, momentum: a.momentum,
         planStatus: (state.plan && state.plan.windows && state.plan.windows[0]) ? state.plan.windows[0].status : null,
@@ -2139,7 +2180,7 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
     if (!w || !w.signal) return null;
     if (d.candles.length < 60) return null;
     if (!fresh(d, 90000)) return null;
-    return { ts: now, asset: k, tf: state.tfId, price: d.price, pct: d.change24h == null ? null : d.change24h,
+    return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, w.signal), price: d.price, pct: d.change24h == null ? null : d.change24h,
       signal: w.signal, confidence: w.conf, entryLow: null, entryHigh: null, stop: null, target: null,
       regime: null, strength: null, volLabel: null, momentum: null, planStatus: null, dataQuality: 'ok-partial' };
   }
