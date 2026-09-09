@@ -2004,7 +2004,13 @@ setInterval(()=>{
     } else if(w.status==='ACTIVE' && w.invalidated && nowS-state.planGenAt>5){
       w.status='INVALIDATED';
       evaluateWindow(w);
-      runAnalysis(true);
+      // Do NOT regenerate the plan immediately after invalidation.
+      // If the same signal direction is still active, immediate regeneration
+      // creates a new plan which can hit the same stop and regenerate again.
+      // The next plan is created when this window expires, or when the
+      // high-confidence signal-flip logic in runAnalysis() detects a genuine
+      // direction change.
+      runAnalysis(false);
       toast('WINDOW INVALIDATED — PRICE CROSSED STOP', 'bear');
     }
   }
