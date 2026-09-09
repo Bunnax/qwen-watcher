@@ -231,9 +231,22 @@ function onState(frame) {
    * Identical signalId = same active signal.
    * Different signalId = new signal/window.
    */
-  const signalId =
-    frame.signalId ||
-    `${asset}|${timeframe}|${now}|${direction}`;
+  /*
+   * Every qwen-state frame must carry a stable signalId.
+   * Never manufacture an ID from the current timestamp:
+   * doing so turns every publisher heartbeat into a new trade.
+   */
+  const signalId = String(frame.signalId || '');
+
+  if (!signalId) {
+    logger(
+      'Ignoring qwen-state without signalId:',
+      asset,
+      timeframe,
+      direction
+    );
+    return;
+  }
 
   if (openSignals.has(key)) {
     const existing = openSignals.get(key);

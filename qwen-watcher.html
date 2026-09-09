@@ -2179,6 +2179,7 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
       return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, a.signal), price: d.price, pct: d.change24h == null ? null : d.change24h,
         signal: a.signal, confidence: a.confidence, entryLow: a.entryLow, entryHigh: a.entryHigh, stop: a.stop, target: a.target,
         regime: a.regime, strength: a.strength, volLabel: a.volLabel, momentum: a.momentum,
+        signalId: stableSignalId(k, state.tfId, a.signal, state.planGenAt),
         planStatus: (state.plan && state.plan.windows && state.plan.windows[0]) ? state.plan.windows[0].status : null,
         dataQuality: 'ok' };
     }
@@ -2188,7 +2189,9 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
     if (!fresh(d, 90000)) return null;
     return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, w.signal), price: d.price, pct: d.change24h == null ? null : d.change24h,
       signal: w.signal, confidence: w.conf, entryLow: null, entryHigh: null, stop: null, target: null,
-      regime: null, strength: null, volLabel: null, momentum: null, planStatus: null, dataQuality: 'ok-partial' };
+      regime: null, strength: null, volLabel: null, momentum: null,
+      signalId: stableSignalId(k, state.tfId, w.signal, 0),
+      planStatus: null, dataQuality: 'ok-partial' };
   }
   function publish() {
     var ws = Feed.ws;
