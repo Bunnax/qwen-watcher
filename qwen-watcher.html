@@ -88,14 +88,7 @@ tailwind.config = {
   #debugLog div{ white-space:pre-wrap; word-break:break-word; }
   pre.codebox{ white-space:pre; font-size:9.5px; line-height:1.5; }
 </style>
-<script>
-  function getWsUrl() {
-    if (window.location.protocol === 'file:') return 'ws://localhost:10000/feed';
-    var loc = window.location;
-    var proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-    return proto + '//' + loc.host + '/feed';
-  }
-</script></head>
+</head>
 <body class="text-slate-200 font-disp antialiased relative">
 
 <div id="simBanner" class="hidden relative z-50 bg-bear/10 border-b border-bear/40 text-bear text-[11px] font-mono tracking-wider px-4 py-2 text-center">
@@ -426,7 +419,1672 @@ tailwind.config = {
 
 <div id="toasts" class="fixed bottom-4 right-4 z-[90] space-y-2 w-[300px]"></div>
 
+<script>
+'use strict';
+/* QWEN WATCHER v3.2 — network-path diagnostics build. Real data only. */
 
+const WS_URL = 'wss://advanced-trade-ws.coinbase.com';
+const PRODUCTS = ['BTC-USD','ETH-USD','SOL-USD'];
+const PRODUCT_TO_ASSET = { 'BTC-USD':'BTC', 'ETH-USD':'ETH', 'SOL-USD':'SOL' };
+
+const FeedConfig = {
+  mode:'auto', relayUrl:'ws://localhost:8787/feed',
+  load(){ try{ this.mode=localStorage.getItem('qw_feed_mode')||'auto'; }catch(e){} try{ this.relayUrl=localStorage.getItem('qw_relay_url')||'ws://localhost:8787/feed'; }catch(e){} },
+  save(){ try{ localStorage.setItem('qw_feed_mode',this.mode); localStorage.setItem('qw_relay_url',this.relayUrl); }catch(e){} }
+};
+FeedConfig.load();
+
+function logoSources(file, cg){
+  return [
+    'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/svg/color/'+file+'.svg',
+    'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color/'+file+'.svg',
+    cg
+  ];
+}
+const ASSETS = {
+  BTC: { name:'Bitcoin',  pair:'BTC/USD', base:'BTC', product:'BTC-USD', color:'#f7931a', selDec:0, logo:logoSources('btc','https://assets.coingecko.com/coins/images/1/small/bitcoin.png') },
+  ETH: { name:'Ethereum', pair:'ETH/USD', base:'ETH', product:'ETH-USD', color:'#8a9ff0', selDec:0, logo:logoSources('eth','https://assets.coingecko.com/coins/images/279/small/ethereum.png') },
+  SOL: { name:'Solana',   pair:'SOL/USD', base:'SOL', product:'SOL-USD', color:'#9945ff', selDec:2, logo:logoSources('sol','https://assets.coingecko.com/coins/images/4128/small/solana.png') },
+};
+const ASSET_KEYS = ['BTC','ETH','SOL'];
+
+const TRADINGVIEW_SYMBOLS = { BTC:'BINANCE:BTCUSDT', ETH:'COINBASE:ETHUSD', SOL:'BINANCE:SOLUSDT' };
+const TV_META = {
+  BTC:{ url:'https://www.tradingview.com/symbols/BTCUSDT/?exchange=BINANCE', text:'BTCUSDT price', note:'CHART FEED: BINANCE BTCUSDT (USDT-QUOTED)' },
+  ETH:{ url:'https://www.tradingview.com/symbols/ETHUSD/?exchange=COINBASE', text:'Ethereum price', note:'CHART FEED: COINBASE ETHUSD' },
+  SOL:{ url:'https://www.tradingview.com/symbols/SOLUSDT/?exchange=BINANCE', text:'SOLUSDT price', note:'CHART FEED: BINANCE SOLUSDT (USDT-QUOTED)' },
+};
+const TIMEFRAMES = [
+  { id:'1m', label:'1m',  sec:60,    advGran:'ONE_MINUTE' },
+  { id:'5m', label:'5m',  sec:300,   advGran:'FIVE_MINUTE' },
+  { id:'15m',label:'15m', sec:900,   advGran:'FIFTEEN_MINUTE' },
+  { id:'1H', label:'1H',  sec:3600,  advGran:'ONE_HOUR' },
+  { id:'4H', label:'4H',  sec:14400, advGran:null },
+  { id:'1D', label:'1D',  sec:86400, advGran:'ONE_DAY' },
+];
+const EXCH_GRAN = { '1m':60, '5m':300, '15m':900, '1H':3600, '4H':14400, '1D':86400 };
+const WINDOW_MIN  = { '1m':5, '5m':15, '15m':30, '1H':60, '4H':240, '1D':1440 };
+const TYP_ATR_PCT = { '1m':0.10, '5m':0.22, '15m':0.35, '1H':0.70, '4H':1.40, '1D':2.60 };
+const C = { bull:'#0ecb81', bear:'#f6465d', warn:'#f0b90b' };
+
+const marketData = {
+  BTC:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null },
+  ETH:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null },
+  SOL:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null },
+};
+
+const $ = id => document.getElementById(id);
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const avg = a => a.length ? a.reduce((s,x)=>s+x,0)/a.length : 0;
+const fmt$ = v => v==null||isNaN(v) ? 'N/A' : '$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmt$0 = v => v==null||isNaN(v) ? 'N/A' : '$'+Math.round(v).toLocaleString('en-US');
+const fmtSel = (v,dec) => v==null||isNaN(v) ? 'N/A' : '$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+const fmtPct = v => v==null||isNaN(v) ? 'N/A' : (v>=0?'+':'')+v.toFixed(2)+'%';
+const hhmm = s => new Date(s*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function redactUrl(u){
+  try{
+    const x=new URL(u);
+    let s=x.protocol+'//'+(x.username||x.password?'[CREDENTIALS REDACTED]@':'')+x.host+x.pathname;
+    if(x.search) s+='?[QUERY REDACTED]';
+    return s;
+  }catch(e){ return String(u).replace(/\/\/([^@\/]+)@/,'//[CREDENTIALS REDACTED]@'); }
+}
+function urlParts(u){
+  try{ const x=new URL(u); return { hostname:x.hostname, port:x.port||(x.protocol==='wss:'||x.protocol==='https:'?'443':'80'), protocol:x.protocol }; }
+  catch(e){ return { hostname:'UNPARSEABLE', port:'?', protocol:'?' }; }
+}
+class Emitter{ constructor(){ this.h={}; } on(e,f){ (this.h[e]=this.h[e]||[]).push(f); } emit(e,...a){ (this.h[e]||[]).forEach(f=>f(...a)); } }
+const Bus = new Emitter();
+function toast(msg, tone){
+  tone = tone||'info';
+  const colors = { info:'border-white/15 text-slate-200', bull:'border-bull/40 text-bull', bear:'border-bear/40 text-bear', warn:'border-warn/40 text-warn' };
+  const el = document.createElement('div');
+  el.className = 'toast-in panel px-3.5 py-2.5 text-[10.5px] font-mono tracking-wider border '+(colors[tone]||colors.info);
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .4s'; setTimeout(()=>el.remove(),400); }, 4200);
+}
+async function fetchJSON(url, timeoutMs){
+  timeoutMs = timeoutMs||9000;
+  const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(), timeoutMs);
+  const t0=performance.now();
+  try{
+    const r=await fetch(url, { signal:ctrl.signal, headers:{'Accept':'application/json'}, cache:'no-store' });
+    if(!r.ok) throw new Error('HTTP '+r.status+' '+r.statusText);
+    return await r.json();
+  }catch(e){
+    const ms=Math.round(performance.now()-t0);
+    let detail;
+    if(e.name==='AbortError') detail='TIMEOUT after '+ms+'ms — request never completed (blocked outbound network, DNS failure, or unreachable host)';
+    else detail=(e.name||'Error')+': '+(e.message||String(e));
+    const err=new Error(detail); err.ms=ms; throw err;
+  } finally { clearTimeout(t); }
+}
+function persistAsset(key){
+  try{ localStorage.setItem('qw_asset',key); }catch(e){}
+  try{ const url=new URL(location.href); url.searchParams.set('asset',key); history.replaceState(null,'',url); }catch(e){}
+}
+function initialAsset(){
+  try{ const q=new URLSearchParams(location.search).get('asset'); if(q && ASSETS[q.toUpperCase()]) return q.toUpperCase(); }catch(e){}
+  try{ const s=localStorage.getItem('qw_asset'); if(s && ASSETS[s]) return s; }catch(e){}
+  return 'BTC';
+}
+function logoTag(key,size){
+  const srcs=ASSETS[key].logo;
+  return '<img src="'+srcs[0]+'" data-srcs="'+srcs.join('|')+'" data-i="0" onerror="logoFallback(this)" width="'+size+'" height="'+size+'" alt="'+key+' logo" class="flex-none" style="border-radius:999px;object-fit:contain" draggable="false">';
+}
+function logoFallback(img){
+  const list=(img.dataset.srcs||'').split('|');
+  const i=parseInt(img.dataset.i||'0',10)+1;
+  if(i<list.length){ img.dataset.i=String(i); img.src=list[i]; }
+  else img.style.visibility='hidden';
+}
+
+const Debug = {
+  lines:[], open:false,
+  log(type,msg){
+    const t=new Date();
+    const ts=t.toLocaleTimeString('en-GB',{hour12:false})+'.'+String(t.getMilliseconds()).padStart(3,'0');
+    this.lines.push({ts,type,msg});
+    if(this.lines.length>300) this.lines.shift();
+    console.log('[QWEN-FEED]['+type.toUpperCase()+'] '+msg);
+    if(this.open) this.append({ts,type,msg});
+  },
+  append(l){
+    const colors={ info:'text-slate-400', ok:'text-bull', warn:'text-warn', error:'text-bear', tick:'text-sky-300' };
+    const div=document.createElement('div');
+    div.innerHTML='<span class="text-mut/70">'+l.ts+'</span> <span class="'+(colors[l.type]||'text-slate-400')+'">['+l.type.toUpperCase()+']</span> <span class="text-slate-300">'+escapeHtml(l.msg)+'</span>';
+    const box=$('debugLog'); box.appendChild(div);
+    while(box.children.length>300) box.removeChild(box.firstChild);
+    box.scrollTop=box.scrollHeight;
+  },
+  renderAll(){ const box=$('debugLog'); box.innerHTML=''; this.lines.forEach(l=>this.append(l)); },
+  toggle(force){
+    this.open = force!=null ? force : !this.open;
+    $('debugDrawer').classList.toggle('hidden', !this.open);
+    if(this.open) this.renderAll();
+  }
+};
+const dbg=(type,msg)=>Debug.log(type,msg);
+
+const Env = {
+  info:null,
+  detect(){
+    let protocol='unknown', host='', iframe=false;
+    try{ protocol=location.protocol; host=location.host; }catch(e){}
+    try{ iframe = window.self!==window.top; }catch(e){ iframe=true; }
+    const wsSupported=('WebSocket' in window);
+    let label;
+    if(protocol==='file:') label='LOCAL FILE (file://)';
+    else if(iframe) label='EMBEDDED/IFRAME PREVIEW';
+    else if(host==='localhost'||host.startsWith('127.')) label='LOCALHOST';
+    else if(protocol==='https:') label='HTTPS WEBSITE';
+    else label='HTTP (INSECURE)';
+    this.info={protocol,host,iframe,wsSupported,label};
+    dbg('info','ENVIRONMENT: '+label+' · protocol='+protocol+' host='+(host||'—')+' iframe='+(iframe?'yes':'no')+' WebSocketAPI='+(wsSupported?'supported':'MISSING')+' online='+navigator.onLine);
+    return this.info;
+  }
+};
+
+const NetDiag = {
+  report:{ network:'TESTING…', dns:'TESTING…', relay:'NOT TESTED', coinbase:'NOT TESTED', ticker:'NOT RECEIVING' },
+  relayDetail:'', coinbaseDetail:'', verdict:'DIAGNOSTICS IN PROGRESS…', proxy:false, lastVerdict:'',
+  setNd(id, text, tone, title){
+    const el=$(id); el.textContent=text;
+    el.className = (tone==='bull'?'text-bull':tone==='bear'?'text-bear':tone==='warn'?'text-warn':'text-mut')+' truncate text-right';
+    if(title!=null) el.title=title;
+  },
+  render(){
+    const r=this.report;
+    this.setNd('ndNet', r.network, r.network.startsWith('AVAILABLE')?'bull': r.network==='BLOCKED'?'bear':'warn');
+    this.setNd('ndDns', r.dns, r.dns.startsWith('SUCCESS')?'bull': r.dns.startsWith('FAILED')?'bear':'warn');
+    this.setNd('ndRelay', r.relay, r.relay==='SUCCESS'?'bull': r.relay==='NOT TESTED'?'mut':'bear', this.relayDetail);
+    this.setNd('ndCb', r.coinbase, r.coinbase==='SUCCESS'?'bull': r.coinbase==='NOT TESTED'?'mut':'bear', this.coinbaseDetail);
+    this.setNd('ndTick', r.ticker, r.ticker==='RECEIVING'?'bull':'bear');
+    $('stVerdict').textContent=this.verdict;
+    if(this.verdict!==this.lastVerdict){ this.lastVerdict=this.verdict; if(this.verdict.indexOf('VERDICT')===0) toast(this.verdict.slice(0,120),'warn'); }
+  },
+  async probeHttp(){
+    dbg('info','HTTP PATH DIAGNOSTICS — probing documented endpoints (results prove DNS/TLS/network reachability)');
+    this.proxy=false;
+    try{
+      const h=await fetchJSON('/api/health', 3000);
+      if(h && h.ok){ this.proxy=true; dbg('ok','SAME-ORIGIN BACKEND DETECTED — /api/health ok; REST will route through the application backend'); }
+    }catch(e){ dbg('info','SAME-ORIGIN BACKEND /api/health not present ('+e.message+')'); }
+    let cbOk=false, cbDetail='';
+    const cbUrl='https://api.coinbase.com/v2/time';
+    try{
+      const t0=performance.now();
+      const j=await fetchJSON(cbUrl, 8000);
+      cbOk=true; cbDetail='GET '+cbUrl+' → ok in '+Math.round(performance.now()-t0)+'ms (server time '+((j&&j.data&&j.data.iso)||'?')+')';
+      dbg('ok','HTTPS PROBE api.coinbase.com SUCCESS — '+cbDetail);
+    }catch(e){
+      cbDetail='GET '+cbUrl+' → '+e.message;
+      dbg('error','HTTPS PROBE api.coinbase.com FAILED — '+cbDetail);
+    }
+    let ctlOk=false, ctlDetail='';
+    const ctlUrl='https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/package.json';
+    try{
+      await fetchJSON(ctlUrl, 8000);
+      ctlOk=true; ctlDetail='GET '+ctlUrl+' → ok';
+      dbg('ok','HTTPS CONTROL PROBE (jsDelivr CDN) SUCCESS');
+    }catch(e){
+      ctlDetail='GET '+ctlUrl+' → '+e.message;
+      dbg('error','HTTPS CONTROL PROBE (jsDelivr CDN) FAILED — '+ctlDetail);
+    }
+    if(cbOk){ this.report.network='AVAILABLE'; this.report.dns='SUCCESS'; this.verdict='Outbound network is AVAILABLE. Continuing WebSocket path diagnostics.'; }
+    else if(ctlOk){ this.report.network='AVAILABLE'; this.report.dns='SUCCESS (CONTROL HOST OK)'; this.verdict='VERDICT: general outbound works but api.coinbase.com is blocked/refused in this environment (CSP/allowlist/policy). WebSocket to Coinbase will also fail.'; }
+    else { this.report.network='BLOCKED'; this.report.dns='FAILED'; this.verdict='VERDICT: This preview environment blocks outbound network access (HTTPS probes to Coinbase and the control CDN both failed). Browser WebSocket/DNS connections cannot succeed here. Do not circumvent the sandbox — run qwen-backend.js locally instead.'; }
+    dbg('info','NETWORK ACCESS: '+this.report.network+' · DNS RESOLUTION: '+this.report.dns);
+    this.render();
+    return { cbOk, ctlOk };
+  }
+};
+
+function classifyClose(code, reason, wasClean, openedEver, env){
+  if(code===1000||code===1001) return 'CLOSED NORMALLY ('+code+')'+(reason?' — '+reason:'');
+  if(code===1005) return 'CLOSED — NO STATUS CODE (1005)';
+  if(code===1006){
+    if(!openedEver){
+      return env&&env.protocol==='file:'
+        ? 'HANDSHAKE FAILED (1006) — DNS/TLS/network failure or blocked from file:// context'
+        : 'HANDSHAKE FAILED (1006) — DNS resolution failure, TLS failure, connection refused, or blocked by environment CSP/sandbox';
+    }
+    return 'CONNECTION DROPPED (1006) — abnormal closure, no close frame received';
+  }
+  if(code===1002) return 'PROTOCOL ERROR (1002)';
+  if(code===1003) return 'UNSUPPORTED DATA (1003)';
+  if(code===1008) return 'POLICY VIOLATION (1008) — subscription likely rejected';
+  if(code===1011) return 'SERVER ERROR (1011) — connection closed by server';
+  if(code===1015) return 'TLS HANDSHAKE FAILURE (1015)';
+  if(code>=4000) return 'SERVER CLOSE '+code+(reason?' — '+reason:'');
+  return 'CLOSE '+code+(wasClean?' (clean)':' (unclean)')+(reason?' — '+reason:'');
+}
+
+/* ── indicators (real candles only) ── */
+function emaArr(vals, period){
+  const out = new Array(vals.length).fill(null); const k = 2/(period+1); let prev = null;
+  for(let i=0;i<vals.length;i++){
+    if(prev===null){ if(i===period-1){ let s=0; for(let j=0;j<period;j++) s+=vals[j]; prev=s/period; out[i]=prev; } }
+    else { prev = vals[i]*k + prev*(1-k); out[i]=prev; }
+  }
+  return out;
+}
+function smaArr(vals, period){
+  const out = new Array(vals.length).fill(null); let s=0;
+  for(let i=0;i<vals.length;i++){ s+=vals[i]; if(i>=period) s-=vals[i-period]; if(i>=period-1) out[i]=s/period; }
+  return out;
+}
+function rsiArr(vals, period){
+  period=period||14;
+  const out = new Array(vals.length).fill(null); let g=0,l=0;
+  for(let i=1;i<vals.length;i++){
+    const d = vals[i]-vals[i-1], up=Math.max(d,0), dn=Math.max(-d,0);
+    if(i<=period){ g+=up; l+=dn; if(i===period){ g/=period; l/=period; out[i]= l===0?100:100-100/(1+g/l); } }
+    else { g=(g*(period-1)+up)/period; l=(l*(period-1)+dn)/period; out[i]= l===0?100:100-100/(1+g/l); }
+  }
+  return out;
+}
+function macdArr(vals){
+  const f = emaArr(vals,12), s = emaArr(vals,26);
+  const line = new Array(vals.length).fill(null); let first=-1;
+  for(let i=0;i<vals.length;i++){ if(f[i]!=null && s[i]!=null){ line[i]=f[i]-s[i]; if(first<0) first=i; } }
+  const signal = new Array(vals.length).fill(null);
+  if(first>=0){ const seg=emaArr(line.slice(first),9); for(let i=0;i<seg.length;i++) signal[first+i]=seg[i]; }
+  const hist = line.map((v,i)=> (v!=null && signal[i]!=null) ? v-signal[i] : null);
+  return { line, signal, hist };
+}
+function bollArr(vals, period, mult){
+  period=period||20; mult=mult||2;
+  const mid = smaArr(vals,period);
+  const up = new Array(vals.length).fill(null), lo = new Array(vals.length).fill(null);
+  for(let i=period-1;i<vals.length;i++){
+    const m = mid[i]; let d=0;
+    for(let j=i-period+1;j<=i;j++){ const x=vals[j]-m; d+=x*x; }
+    const sd = Math.sqrt(d/period); up[i]=m+mult*sd; lo[i]=m-mult*sd;
+  }
+  return { mid, up, lo };
+}
+function vwapArr(candles){
+  const out = new Array(candles.length).fill(null); let pv=0, v=0;
+  for(let i=0;i<candles.length;i++){
+    const c=candles[i]; const tp=(c.high+c.low+c.close)/3; pv+=tp*c.volume; v+=c.volume;
+    out[i] = v>0 ? pv/v : c.close;
+  }
+  return out;
+}
+function atrArr(candles, period){
+  period=period||14;
+  const out = new Array(candles.length).fill(null); let prev=null;
+  for(let i=1;i<candles.length;i++){
+    const c=candles[i], p=candles[i-1];
+    const tr = Math.max(c.high-c.low, Math.abs(c.high-p.close), Math.abs(c.low-p.close));
+    if(prev===null){ if(i===period){ let s=0; for(let j=1;j<=period;j++){ const cc=candles[j],pp=candles[j-1]; s+=Math.max(cc.high-cc.low,Math.abs(cc.high-pp.close),Math.abs(cc.low-pp.close)); } prev=s/period; out[i]=prev; } }
+    else { prev=(prev*(period-1)+tr)/period; out[i]=prev; }
+  }
+  return out;
+}
+function findSR(candles, px){
+  const look = candles.slice(Math.max(0, candles.length-120));
+  const highs=[], lows=[];
+  for(let i=2;i<look.length-2;i++){
+    const c=look[i]; let h=true,l=true;
+    for(let j=i-2;j<=i+2;j++){ if(j===i) continue; if(look[j].high>c.high) h=false; if(look[j].low<c.low) l=false; }
+    if(h) highs.push(c.high); if(l) lows.push(c.low);
+  }
+  const above = highs.filter(v=>v>px).sort((a,b)=>a-b);
+  const below = lows.filter(v=>v<px).sort((a,b)=>b-a);
+  return { res: above.length?above[0]:Math.max.apply(null,look.map(c=>c.high)), sup: below.length?below[0]:Math.min.apply(null,look.map(c=>c.low)) };
+}
+const lastNonNull = arr => { for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return arr[i]; return null; };
+
+/* ── signal engine ── */
+function analyze(candles, tfId, base){
+  const n = candles.length; if(n < 60) return null;
+  const closes = candles.map(c=>c.close), vols = candles.map(c=>c.volume);
+  const i = n-1, px = closes[i];
+  const e20 = emaArr(closes,20), e50 = emaArr(closes,50), e200 = emaArr(closes,200);
+  const rArr = rsiArr(closes,14); const histM = macdArr(closes); const hist = histM.hist;
+  const bb = bollArr(closes,20,2); const bbMid=bb.mid, bbUp=bb.up, bbLo=bb.lo;
+  const vwap = vwapArr(candles); const atr = atrArr(candles,14);
+  const e20v=lastNonNull(e20), e50v=lastNonNull(e50), e200v=lastNonNull(e200)||e50v;
+  const r=lastNonNull(rArr)||50, histV=lastNonNull(hist)||0;
+  const bbM=lastNonNull(bbMid), bbU=lastNonNull(bbUp), bbL=lastNonNull(bbLo);
+  const vwapV=vwap[i], atrv=lastNonNull(atr)||px*0.004;
+  const atrPct = atrv/px*100;
+  const sr = findSR(candles, px); const sup=sr.sup, res=sr.res;
+  const F = [];
+  let rsiV = clamp((r-50)/25, -1, 1); if(r>75||r<25) rsiV*=0.35;
+  F.push({ label:'RSI momentum', w:14, v:rsiV });
+  F.push({ label:'EMA 20/50 trend', w:16, v: clamp((e20v-e50v)/atrv, -1, 1) });
+  F.push({ label:'EMA 200 bias', w:10, v: px>e200v ? 0.8 : -0.8 });
+  F.push({ label:'MACD histogram', w:16, v: clamp(histV/(atrv*0.35), -1, 1) });
+  F.push({ label:'VWAP position', w:10, v: clamp((px-vwapV)/(atrv*1.2), -1, 1) });
+  const halfW = Math.max((bbU-bbL)/2, 1e-9); const bbPos = (px-bbM)/halfW;
+  let bbV = clamp(bbPos*0.7, -1, 1); if(Math.abs(bbPos)>1.05) bbV*=0.4;
+  F.push({ label:'Bollinger position', w:10, v:bbV });
+  const volRecent = avg(vols.slice(-5)), volBase = avg(vols.slice(-25,-5));
+  const volRatio = volBase>0 ? volRecent/volBase : 1;
+  const volV = (volBase<=0 && volRecent<=0) ? 0 : Math.sign((i>=5?px/closes[i-5]-1:0)||1)*clamp(volRatio-0.9, -0.8, 0.8);
+  F.push({ label:'Volume confirmation', w:10, v:volV });
+  const roc5 = i>=5 ? (px/closes[i-5]-1)*100 : 0;
+  F.push({ label:'5-bar momentum', w:10, v: clamp(roc5/((atrPct*1.5)||0.5), -1, 1) });
+  let srV = 0;
+  if((res-px)/atrv < 0.7) srV -= 0.6;
+  if((px-sup)/atrv < 0.7) srV += 0.45;
+  F.push({ label:'S/R proximity', w:14, v:srV });
+  const W = F.reduce((s,f)=>s+f.w,0);
+  const s = F.reduce((acc,f)=>acc+f.w*f.v,0)/W;
+  const buyScore = clamp(Math.round(50 + s*48), 4, 96);
+  const sellScore = 100 - buyScore;
+  let signal, confidence;
+  if(buyScore>=62){ signal='BUY'; confidence=buyScore; }
+  else if(sellScore>=62){ signal='SELL'; confidence=sellScore; }
+  else { signal='WAIT'; confidence=Math.round(clamp(58+(1-Math.abs(s))*22, 55, 82)); }
+  const roundTo = atrv>=800?100 : atrv>=300?50 : atrv>=100?20 : atrv>=30?5 : atrv>=5?1 : 0.1;
+  const R = v => Math.round(v/roundTo)*roundTo;
+  let entryLow, entryHigh, stop, target;
+  if(signal==='SELL'){
+    entryLow=R(px-atrv*0.30); entryHigh=R(px+atrv*0.30);
+    stop=R(Math.max(res, px+atrv*1.4)); target=R(Math.min(sup, px-atrv*1.9));
+  } else {
+    entryLow=R(px-atrv*0.35); entryHigh=R(px+atrv*0.25);
+    stop=R(Math.min(sup, px-atrv*1.4)); target=R(Math.max(res, px+atrv*1.9));
+  }
+  const align = (Math.sign(e20v-e50v)+Math.sign(e50v-e200v)+Math.sign(px-e200v));
+  const baseA = (align+3)/6;
+  const strength = clamp(Math.round(18+78*(0.5*baseA+0.5*Math.abs(s))), 5, 98);
+  const volR = atrPct/(TYP_ATR_PCT[tfId]||0.5);
+  const volLabel = volR<0.6?'Low' : volR<1.25?'Moderate' : volR<2.1?'High' : 'Extreme';
+  let regime;
+  if((volLabel==='High'||volLabel==='Extreme') && Math.abs(s)<0.35) regime='HIGH VOLATILITY';
+  else if(s>0.35 && baseA>0.66) regime='STRONG BULLISH';
+  else if(s<-0.35 && baseA<0.33) regime='STRONG BEARISH';
+  else if(s>0.12) regime='BULLISH';
+  else if(s<-0.12) regime='BEARISH';
+  else regime='NEUTRAL';
+  const momentum = roc5 > atrPct*0.5 ? 'Bullish' : roc5 < -atrPct*0.5 ? 'Bearish' : 'Neutral';
+  const nearResistance = (res-px)/atrv < 0.7, nearSupport = (px-sup)/atrv < 0.7;
+  const matrix = [
+    { name:'RSI', value:r.toFixed(1), sig: r>=55?'BULLISH': r<=45?'BEARISH':'NEUTRAL' },
+    { name:'MACD', value:(histV>=0?'+':'')+histV.toFixed(roundTo<1?2:0), sig: histV>0?'BULLISH': histV<0?'BEARISH':'NEUTRAL' },
+    { name:'EMA 20/50', value: e20v>=e50v?'Above':'Below', sig: e20v>=e50v?'BULLISH':'BEARISH' },
+    { name:'EMA 200', value: px>=e200v?'Above':'Below', sig: px>=e200v?'BULLISH':'BEARISH' },
+    { name:'VWAP', value: px>=vwapV?'Above':'Below', sig: px>=vwapV?'BULLISH':'BEARISH' },
+    { name:'Bollinger Bands', value: bbPos>0.3?'Upper half': bbPos<-0.3?'Lower half':'Mid-band', sig: Math.abs(bbPos)>1?'NEUTRAL': bbPos>0?'BULLISH': bbPos<0?'BEARISH':'NEUTRAL' },
+  ];
+  const p = [];
+  p.push(base+' is trading '+(px>=e50v?'above':'below')+' the 20 and 50 EMAs'+(px>=e200v ? ' and holds above the 200 EMA.' : ' while sitting under the 200 EMA.'));
+  if(r>=60) p.push('RSI at '+r.toFixed(1)+' shows firm bullish momentum'+(r>72?', though it is approaching overbought territory, which raises pullback risk':'')+'.');
+  else if(r<=40) p.push('RSI at '+r.toFixed(1)+' reflects persistent selling pressure'+(r<28?', though deeply oversold readings increase bounce probability':'')+'.');
+  else p.push('RSI at '+r.toFixed(1)+' sits in the neutral band — neither side controls '+base+' momentum yet.');
+  p.push(histV>0 ? 'MACD histogram is positive ('+histV.toFixed(roundTo<1?2:0)+'), supporting upside continuation.' : 'MACD histogram is negative ('+histV.toFixed(roundTo<1?2:0)+'), favouring downside continuation.');
+  if(nearResistance) p.push('However, '+base+' is approaching the '+fmt$0(res)+' resistance region — breakout requires volume confirmation.');
+  if(nearSupport) p.push(base+' is testing the '+fmt$0(sup)+' support zone; losing it would shift the setup bearish.');
+  if(signal==='BUY') p.push('QWEN therefore assigns a '+confidence+'% bullish probability to this '+base+' setup. Confirmation: holding above '+fmt$0(entryLow)+'; a break of '+fmt$0(stop)+' invalidates the scenario.');
+  else if(signal==='SELL') p.push('QWEN therefore assigns a '+confidence+'% bearish probability to this '+base+' setup. Confirmation: losing '+fmt$0(entryHigh)+'; reclaiming '+fmt$0(stop)+' invalidates the scenario.');
+  else p.push('QWEN therefore recommends patience on '+base+': mixed inputs yield a '+confidence+'% probability that waiting is optimal. Await a decisive break of '+fmt$0(res)+' or '+fmt$0(sup)+' with volume before committing risk.');
+  const factors = F.map(f=>({ label:f.label, impact:Math.round(f.w*f.v) })).filter(f=>f.impact!==0).sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,6);
+  const explain = signal==='BUY'
+    ? 'Bullish momentum detected across '+base+' short-term indicators. Probabilistic setup — confirmation required above '+fmt$0(res)+'.'
+    : signal==='SELL'
+    ? 'Bearish pressure building across '+base+' momentum indicators. Probabilistic setup — watch '+fmt$0(sup)+' for confirmation.'
+    : 'Mixed signals on '+base+' — insufficient confirmation for a directional entry. Capital preservation favored.';
+  return { signal, confidence, buyScore, sellScore, s, px, r, atrv, atrPct, e20v, e50v, e200v, vwapV, bbPos,
+           sup, res, entryLow, entryHigh, stop, target, regime, strength, volLabel, momentum,
+           matrix, reasoning:p.join(' '), factors, nearResistance, nearSupport, explain, base };
+}
+
+/* ── REST layer (documented Coinbase endpoints, or own-backend proxy) ── */
+const API = {
+  tickersUrl(p){ return NetDiag.proxy ? '/api/tickers?product_id='+p : 'https://api.coinbase.com/api/v3/brokerage/market/tickers?product_id='+p; },
+  candlesUrl(p,g){ return NetDiag.proxy ? '/api/candles?product_id='+p+'&granularity='+g+'&limit=300' : 'https://api.coinbase.com/api/v3/brokerage/market/candles?product_id='+p+'&granularity='+g+'&limit=300'; },
+  spotUrl(p){ return 'https://api.coinbase.com/v2/prices/'+p+'/spot'; },
+  exchCandlesUrl(p,g){ return 'https://api.exchange.coinbase.com/products/'+p+'/candles?granularity='+g; }
+};
+async function fetchInitialStats(key){
+  const product=ASSETS[key].product;
+  const d=marketData[key];
+  try{
+    const url=API.tickersUrl(product);
+    const j=await fetchJSON(url, 9000);
+    const t=j && j.tickers && j.tickers[0];
+    if(!t || !isFinite(parseFloat(t.price))) throw new Error('empty tickers payload');
+    d.price=parseFloat(t.price);
+    const ch=parseFloat(t.price_percent_change_24_h); d.change24h=isFinite(ch)?ch:null;
+    d.timestamp=Date.now(); d.lastUpdate=Date.now(); d.source='rest';
+    dbg('ok','REST '+product+' OK — $'+d.price.toLocaleString()+' via '+(NetDiag.proxy?'application backend proxy':'api.coinbase.com v3 tickers'));
+    Bus.emit('ticker', key);
+    return true;
+  }catch(e){
+    dbg('warn','REST tickers '+product+' FAILED — '+e.message);
+  }
+  try{
+    const j=await fetchJSON(API.spotUrl(product), 9000);
+    const amt=j && j.data && parseFloat(j.data.amount);
+    if(!isFinite(amt)) throw new Error('empty spot payload');
+    d.price=amt; d.timestamp=Date.now(); d.lastUpdate=Date.now(); d.source='rest';
+    dbg('ok','REST '+product+' OK — $'+amt.toLocaleString()+' via v2/prices (24h change unavailable on this endpoint: N/A)');
+    Bus.emit('ticker', key);
+    return true;
+  }catch(e){
+    dbg('error','REST '+product+' FAILED — value stays N/A — '+e.message);
+    return false;
+  }
+}
+function aggregateCandles(candles, toSec){
+  const map=new Map(); const out=[];
+  for(const c of candles){
+    const bucket=Math.floor(c.time/toSec)*toSec;
+    let g=map.get(bucket);
+    if(!g){ g={time:bucket, open:c.open, high:c.high, low:c.low, close:c.close, volume:c.volume}; map.set(bucket,g); out.push(g); }
+    else { g.high=Math.max(g.high,c.high); g.low=Math.min(g.low,c.low); g.close=c.close; g.volume+=c.volume; }
+  }
+  return out.sort((a,b)=>a.time-b.time);
+}
+async function fetchCandlesRaw(product, advGran, exchGran){
+  try{
+    const j=await fetchJSON(API.candlesUrl(product, advGran), 9000);
+    const raw=j && j.candles;
+    if(!Array.isArray(raw)||raw.length<60) throw new Error('insufficient candles payload');
+    dbg('ok','REST CANDLES '+product+' '+advGran+' OK — '+raw.length+' candles via '+(NetDiag.proxy?'backend proxy':'v3 candles'));
+    return raw.map(c=>({ time:+c.start, open:+c.open, high:+c.high, low:+c.low, close:+c.close, volume:+c.volume })).reverse();
+  }catch(e){
+    dbg('warn','REST v3 candles '+product+' failed — '+e.message+' — trying Exchange candles');
+  }
+  const raw=await fetchJSON(API.exchCandlesUrl(product, exchGran), 9000);
+  if(!Array.isArray(raw)||raw.length<60) throw new Error('insufficient exchange candles');
+  dbg('ok','REST CANDLES '+product+' OK — '+raw.length+' candles via api.exchange.coinbase.com (fallback)');
+  return raw.map(rr=>({ time:rr[0], low:rr[1], high:rr[2], open:rr[3], close:rr[4], volume:rr[5] })).reverse();
+}
+async function loadCandles(key, tf){
+  const d=marketData[key]; const product=ASSETS[key].product;
+  try{
+    let candles;
+    if(tf.id==='4H'){ candles = aggregateCandles(await fetchCandlesRaw(product,'ONE_HOUR',3600), 14400); }
+    else { candles = await fetchCandlesRaw(product, tf.advGran, EXCH_GRAN[tf.id]); }
+    d.candles=candles; d.candleStamp=Date.now(); d.candleTf=tf.id;
+    return candles;
+  }catch(e){
+    dbg('error','REST CANDLES '+product+' '+tf.id+' FAILED — '+e.message);
+    return null;
+  }
+}
+async function restBootstrap(activeKey, tf){
+  await Promise.all(ASSET_KEYS.map(k=>fetchInitialStats(k)));
+  renderSelector(); renderWatchlist(); renderWatchStatus(); updatePriceUI(); feedPillUI();
+  await loadCandles(activeKey, tf);
+  if(marketData[activeKey].candles.length){ backfillHistory(); runAnalysis(true); }
+  else renderSignalPending('insufficient');
+}
+async function restRefreshInactive(){
+  const tf=tfCurrent();
+  for(const key of ASSET_KEYS){
+    if(key===state.asset) continue;
+    const arr=await loadCandles(key, tf);
+    if(arr && arr.length){
+      const a=analyze(arr, tf.id, ASSETS[key].base);
+      marketData[key].watchSig = a ? { signal:a.signal, conf:a.confidence } : null;
+    }
+    renderWatchlist();
+  }
+}
+
+/* ── REST polling mode: real data, labeled, never a fake stream ── */
+const RestPoller = {
+  active:false, timer:null, cycle:0,
+  start(){
+    if(this.active) return;
+    this.active=true; this.cycle=0;
+    Feed.setState('REST');
+    $('restBanner').classList.remove('hidden');
+    dbg('warn','REST POLLING MODE STARTED — real Coinbase REST prices every 10s. Degraded, non-streaming fallback — not simulated data.');
+    this.poll();
+    this.timer=setInterval(()=>this.poll(), 10000);
+  },
+  stop(){
+    if(!this.active) return;
+    this.active=false; clearInterval(this.timer); this.timer=null;
+    $('restBanner').classList.add('hidden');
+    dbg('info','REST POLLING STOPPED');
+  },
+  async poll(){
+    this.cycle++;
+    await Promise.all(ASSET_KEYS.map(k=>fetchInitialStats(k)));
+    renderSelector(); renderWatchlist(); renderWatchStatus(); updatePriceUI(); feedPillUI();
+    if(this.cycle%3===1){
+      const arr=await loadCandles(state.asset, tfCurrent());
+      if(arr && arr.length){ if(!Stores[state.asset].backfilled){ backfillHistory(); } runAnalysis(false); }
+      restRefreshInactive();
+    }
+  }
+};
+
+/* ── connection probe: verified before trusting ── */
+const Probe = {
+  steps:[], active:false, ws:null, timers:[], finished:false,
+  startedAt:0, openAt:0, seen:{}, isRelay:false, endpoint:'', resolve:null,
+  defineSteps(isRelay){
+    const rows = [
+      ['env','ENVIRONMENT'],
+      ['target','TARGET ENDPOINT'],
+      ['create','WEBSOCKET CREATE'],
+      ['open', isRelay?'RELAY OPEN':'TLS HANDSHAKE / OPEN'],
+      isRelay ? ['ack','RELAY HELLO'] : ['sent','SUBSCRIPTION SENT'],
+      isRelay ? ['sent','SUBSCRIPTION (RELAY-MANAGED)'] : ['ack','SUBSCRIPTION RESPONSE'],
+      ['tBTC','TICKER BTC-USD'],
+      ['tETH','TICKER ETH-USD'],
+      ['tSOL','TICKER SOL-USD'],
+      ['result','RESULT'],
+    ];
+    this.steps = rows.map(rr=>({id:rr[0],label:rr[1],status:'pending',detail:''}));
+    this.render();
+  },
+  setStep(id, status, detail){
+    const st=this.steps.find(s=>s.id===id); if(!st) return;
+    st.status=status; if(detail!=null) st.detail=detail;
+    this.render();
+  },
+  render(){
+    $('diagBox').innerHTML = this.steps.map(s=>{
+      const dot = s.status==='ok' ? 'bg-bull' : s.status==='fail' ? 'bg-bear' : s.status==='active' ? 'bg-warn pulse' : 'bg-mut';
+      const col = s.status==='ok' ? 'text-slate-200' : s.status==='fail' ? 'text-bear' : s.status==='active' ? 'text-warn' : 'text-mut';
+      return '<div class="flex items-center gap-2 text-[9.5px] font-mono leading-relaxed">'+
+        '<span class="dot '+dot+'"></span>'+
+        '<span class="w-44 flex-none text-slate-300 tracking-wider">'+s.label+'</span>'+
+        '<span class="flex-1 '+col+' truncate" title="'+escapeHtml(s.detail||'')+'">'+escapeHtml(s.detail||(s.status==='active'?'…':s.status==='pending'?'—':''))+'</span>'+
+        '</div>';
+    }).join('');
+  },
+  clearTimers(){ this.timers.forEach(t=>clearTimeout(t)); this.timers=[]; },
+  run(endpoint, isRelay, opts){
+    opts=opts||{};
+    if(this.active) return Promise.resolve({ok:false, category:'PROBE_ALREADY_RUNNING'});
+    this.active=true; this.finished=false; this.seen={}; this.isRelay=isRelay; this.endpoint=endpoint;
+    this.startedAt=Date.now();
+    this.defineSteps(isRelay);
+    const env=Env.info||Env.detect();
+    this.setStep('env','ok', Env.info.label+' · iframe='+env.iframe+' · protocol='+env.protocol);
+    const parts=urlParts(endpoint);
+    this.setStep('target','ok', redactUrl(endpoint)+'  (hostname: '+parts.hostname+', port: '+parts.port+', '+(isRelay?'server-side relay (browser → backend → Coinbase)':'direct Coinbase WebSocket')+')');
+    dbg('info','PROBE TARGET: '+redactUrl(endpoint)+' — hostname='+parts.hostname+' port='+parts.port+' protocol='+parts.protocol+' type='+(isRelay?'SERVER-SIDE RELAY':'DIRECT COINBASE WS'));
+    if(!env.wsSupported){
+      this.setStep('create','fail','WebSocket API not available in this environment');
+      return Promise.resolve(this.finish('NO_WEBSOCKET_SUPPORT'));
+    }
+    if(parts.protocol==='ws:' && env.protocol==='https:'){
+      const cat='BLOCKED BEFORE CONNECT — MIXED CONTENT: ws:// is not permitted from an https page. Use a wss:// relay endpoint.';
+      this.setStep('create','fail',cat);
+      dbg('error','PROBE '+cat);
+      return Promise.resolve(this.finish(cat));
+    }
+    this.setStep('create','active');
+    dbg('info','PROBE CONNECTING (readyState→0) '+redactUrl(endpoint));
+    let ws;
+    try{ ws=new WebSocket(endpoint); }
+    catch(e){
+      const cat=(e.name==='SecurityError')
+        ? 'ENVIRONMENT BLOCKED WEBSOCKET (SecurityError) — sandboxed iframe / CSP / host restriction. Connection refused before any network I/O.'
+        : 'SOCKET CREATE FAILED — '+e.name+': '+e.message;
+      this.setStep('create','fail',cat);
+      dbg('error','PROBE '+cat);
+      return Promise.resolve(this.finish(cat));
+    }
+    this.ws=ws;
+    return new Promise(res=>{
+      this.resolve=res;
+      const tOpen=opts.openTimeout||10000;
+      this.timers.push(setTimeout(()=>{
+        if(!this.finished) this.finish('HANDSHAKE TIMEOUT — no OPEN within '+(tOpen/1000)+'s (DNS resolution failure, TLS failure, connection refused, or environment network block)');
+      }, tOpen));
+      ws.onopen=()=>{
+        this.openAt=Date.now();
+        const ms=this.openAt-this.startedAt;
+        dbg('ok','PROBE WEBSOCKET OPEN — '+redactUrl(endpoint)+' in '+ms+'ms (TLS handshake complete)');
+        this.setStep('open','ok','OPEN in '+ms+'ms');
+        if(isRelay){
+          this.setStep('ack','active','waiting for relay hello frame');
+          this.timers.push(setTimeout(()=>{ if(!this.finished) this.finish('RELAY CONNECTED BUT NO HELLO FRAME WITHIN 8s — relay process is not a QWEN backend'); }, 8000));
+        } else {
+          ws.send(JSON.stringify({ type:'subscribe', product_ids:PRODUCTS.slice(), channel:'ticker', timestamp:new Date().toISOString() }));
+          ws.send(JSON.stringify({ type:'subscribe', product_ids:PRODUCTS.slice(), channel:'heartbeats', timestamp:new Date().toISOString() }));
+          dbg('info','SUBSCRIPTION SENT → ticker ['+PRODUCTS.join(', ')+']');
+          dbg('info','SUBSCRIPTION SENT → heartbeats');
+          this.setStep('sent','ok','ticker + heartbeats for BTC-USD, ETH-USD, SOL-USD');
+          this.setStep('ack','active','waiting for subscriptions ack');
+          this.timers.push(setTimeout(()=>{ if(!this.finished) this.finish('NO SUBSCRIPTION RESPONSE WITHIN 8s — malformed subscription or server rejecting silently'); }, 8000));
+        }
+      };
+      ws.onmessage=ev=>{
+        if(this.finished) return;
+        let m;
+        try{ m=JSON.parse(ev.data); }
+        catch(e){
+          dbg('error','PROBE PARSING ERROR — non-JSON payload: '+String(ev.data).slice(0,100));
+          this.setStep('result','fail','APPLICATION PARSING ERROR');
+          return;
+        }
+        if(isRelay && m.type==='hello'){
+          dbg('ok','RELAY HELLO RECEIVED — upstream='+(m.upstream||'?')+' state='+(m.upstreamState||'?'));
+          this.setStep('ack','ok','hello received · upstream '+(m.upstreamState||'?'));
+          this.setStep('sent','ok','relay maintains the Coinbase subscription server-side');
+          this.armTickerTimeout();
+          return;
+        }
+        if(m.channel==='subscriptions'){
+          const subs=m.events && m.events[0] && m.events[0].subscriptions;
+          dbg('ok','SUBSCRIPTION RESPONSE RECEIVED — '+JSON.stringify(subs));
+          this.setStep('ack','ok','ACCEPTED — '+(subs?Object.keys(subs).map(k=>k+'['+((subs[k]||[]).length)+']').join(' '):'ack'));
+          this.armTickerTimeout();
+          return;
+        }
+        if(m.channel==='error'){
+          const msg=(m.events&&m.events[0]&&(m.events[0].message||m.events[0].error))||JSON.stringify(m).slice(0,140);
+          dbg('error','COINBASE ERROR FRAME — '+msg);
+          this.finish('SUBSCRIPTION REJECTED BY COINBASE — '+msg);
+          return;
+        }
+        if(m.channel==='ticker'){
+          for(const e of m.events||[]){
+            if(e.type==='error'){ this.finish('SUBSCRIPTION REJECTED BY COINBASE — '+(e.message||'unknown')); return; }
+            for(const t of e.tickers||[]){
+              const key=PRODUCT_TO_ASSET[t.product_id]; if(!key) continue;
+              const price=parseFloat(t.price); if(!isFinite(price)) continue;
+              if(!this.seen[key]){
+                this.seen[key]=price;
+                dbg('tick','PROBE TICKER '+t.product_id+' RECEIVED — $'+price.toLocaleString());
+                this.setStep('t'+key,'ok','RECEIVED $'+price.toLocaleString());
+                if(ASSET_KEYS.every(k=>this.seen[k])) this.succeed();
+              }
+            }
+          }
+        }
+      };
+      ws.onerror=()=>{ dbg('error','PROBE WEBSOCKET ERROR event (browser hides details; close event carries the code/reason)'); };
+      ws.onclose=ev=>{
+        if(this.finished) return;
+        const cat=classifyClose(ev.code, ev.reason, ev.wasClean, this.openAt>0, env);
+        dbg('warn','PROBE WEBSOCKET CLOSE code='+ev.code+' reason="'+(ev.reason||'')+'" clean='+ev.wasClean+' — '+cat);
+        this.finish(cat);
+      };
+    });
+  },
+  armTickerTimeout(){
+    this.timers.push(setTimeout(()=>{
+      if(this.finished) return;
+      const missing=ASSET_KEYS.filter(k=>!this.seen[k]).map(k=>ASSETS[k].product).join(', ');
+      this.finish('SUBSCRIBED BUT NO TICKER DATA WITHIN 20s (missing: '+(missing||'—')+')');
+    }, 20000));
+  },
+  succeed(){
+    this.clearTimers();
+    this.finished=true; this.active=false;
+    this.setStep('result','ok','VERIFIED: OPEN → SUBSCRIPTION ACCEPTED → BTC/ETH/SOL TICKERS RECEIVED');
+    dbg('ok','PROBE RESULT: SUCCESS — promoting probe socket to live feed ('+redactUrl(this.endpoint)+')');
+    Feed.adopt(this.ws, this.endpoint, this.isRelay);
+    this.ws=null;
+    if(this.resolve) this.resolve({ok:true, category:'OK'});
+  },
+  finish(category){
+    this.clearTimers();
+    this.finished=true; this.active=false;
+    ['open','sent','ack','tBTC','tETH','tSOL'].forEach(id=>{
+      const st=this.steps.find(s=>s.id===id);
+      if(st && st.status!=='ok') st.status='fail';
+    });
+    this.setStep('result','fail',category);
+    dbg('error','PROBE RESULT: FAILURE — '+category);
+    try{ if(this.ws){ this.ws.onclose=null; this.ws.close(); } }catch(e){}
+    this.ws=null;
+    if(this.resolve) this.resolve({ok:false, category});
+    return {ok:false, category};
+  }
+};
+
+/* ── feed: LIVE only after verified real tickers ── */
+const Feed = {
+  ws:null, endpoint:null, isRelay:false, state:'CONNECTING', attempts:0,
+  lastMsgAt:0, everOnline:false, paused:false, tradesProduct:null, lastCategory:'',
+  msgCount:{BTC:0,ETH:0,SOL:0}, tradeCount:0, totalMsgs:0,
+  setState(s){
+    if(this.state===s) return;
+    const prev=this.state; this.state=s;
+    dbg(s==='ONLINE'?'ok':s==='OFFLINE'?'error':'warn', 'FEED STATE '+prev+' → '+s);
+    Bus.emit('feedState');
+    if(s==='ONLINE' && (prev==='OFFLINE'||prev==='RECONNECTING'||prev==='REST')) toast('LIVE WEBSOCKET FEED RESTORED','bull');
+  },
+  adopt(ws, endpoint, isRelay){
+    this.ws=ws; this.endpoint=endpoint; this.isRelay=isRelay;
+    this.lastMsgAt=Date.now(); this.attempts=0; this.everOnline=true;
+    this.setState('ONLINE');
+    NetDiag.report.ticker='RECEIVING'; NetDiag.render();
+    RestPoller.stop();
+    ws.onmessage=ev=>this.onMessage(ev);
+    ws.onerror=()=>dbg('error','FEED WEBSOCKET ERROR event');
+    ws.onclose=ev=>{
+      const cat=classifyClose(ev.code, ev.reason, ev.wasClean, true, Env.info);
+      dbg('warn','FEED WEBSOCKET CLOSE code='+ev.code+' reason="'+(ev.reason||'')+'" — '+cat);
+      this.lastCategory=cat; this.ws=null;
+      NetDiag.report.ticker='NOT RECEIVING';
+      this.setState('RECONNECTING');
+      scheduleEstablish();
+    };
+    this.tradesProduct=ASSETS[state.asset].product;
+    if(!isRelay){
+      this.rawSend({ type:'subscribe', channel:'market_trades', product_ids:[this.tradesProduct], timestamp:new Date().toISOString() });
+    } else {
+      dbg('info','RELAY MODE — market_trades are forwarded by the backend relay for all products');
+    }
+    dbg('ok','SOCKET PROMOTED TO LIVE FEED — '+redactUrl(endpoint)+' ('+(isRelay?'backend relay':'direct')+')');
+  },
+  rawSend(obj){
+    if(this.ws && this.ws.readyState===1){
+      this.ws.send(JSON.stringify(obj));
+      dbg('info','SUBSCRIPTION SENT → '+obj.channel+' ['+((obj.product_ids||[]).join(', '))+']');
+    }
+  },
+  switchTrades(key){
+    const np=ASSETS[key].product;
+    if(this.tradesProduct===np) return;
+    if(!this.isRelay && this.ws && this.ws.readyState===1 && this.tradesProduct){
+      this.ws.send(JSON.stringify({ type:'unsubscribe', channel:'market_trades', product_ids:[this.tradesProduct] }));
+      dbg('info','UNSUBSCRIBE SENT → market_trades ['+this.tradesProduct+']');
+    }
+    this.tradesProduct=np;
+    if(!this.isRelay) this.rawSend({ type:'subscribe', channel:'market_trades', product_ids:[np], timestamp:new Date().toISOString() });
+  },
+  watchdog(){
+    if(!this.ws || this.ws.readyState!==1) return;
+    if(Date.now()-this.lastMsgAt>25000){
+      dbg('warn','WATCHDOG: no messages for 25s — closing socket to force reconnect');
+      try{ this.ws.close(); }catch(e){}
+    }
+  },
+  onMessage(ev){
+    let m;
+    try{ m=JSON.parse(ev.data); }
+    catch(e){ dbg('error','FEED PARSING ERROR — dropped non-JSON payload'); return; }
+    this.lastMsgAt=Date.now(); this.totalMsgs++;
+    if(this.isRelay && m.type==='hello') return;
+    if(m.channel==='subscriptions' || m.channel==='heartbeats') return;
+    if(m.channel==='error'){ dbg('error','COINBASE ERROR FRAME — '+JSON.stringify(m.events||m).slice(0,160)); return; }
+    if(m.channel==='ticker'){
+      for(const e of m.events||[]){
+        if(e.type==='error'){ dbg('error','TICKER CHANNEL ERROR — '+(e.message||'unknown')); continue; }
+        for(const t of e.tickers||[]) this.onTicker(t, m.timestamp);
+      }
+      return;
+    }
+    if(m.channel==='market_trades'){
+      for(const e of m.events||[]){
+        if(e.type==='error') continue;
+        for(const t of e.trades||[]) this.onTrade(t);
+      }
+      return;
+    }
+  },
+  onTicker(t, tsIso){
+    const key=PRODUCT_TO_ASSET[t.product_id]; if(!key) return;
+    const price=parseFloat(t.price); if(!isFinite(price)) return;
+    const d=marketData[key];
+    d.price=price;
+    d.timestamp=tsIso ? Date.parse(tsIso) : Date.now();
+    const ch=parseFloat(t.price_percent_change_24_h); d.change24h=isFinite(ch)?ch:null;
+    d.connected=true; d.lastUpdate=Date.now(); d.source='ws';
+    this.msgCount[key]++;
+    NetDiag.report.ticker='RECEIVING';
+    if(this.state!=='ONLINE') this.setState('ONLINE');
+    if(this.msgCount[key]===1 || this.msgCount[key]%50===0){
+      dbg('tick','TICKER '+t.product_id+' price=$'+price.toLocaleString()+' 24h='+(d.change24h!=null?fmtPct(d.change24h):'N/A'));
+    }
+    if(!this.paused) Bus.emit('ticker', key);
+  },
+  onTrade(t){
+    const key=PRODUCT_TO_ASSET[t.product_id]; if(!key) return;
+    const price=parseFloat(t.price), size=parseFloat(t.size);
+    if(!isFinite(price)) return;
+    const d=marketData[key];
+    d.price=price; d.timestamp=Date.now(); d.connected=true; d.lastUpdate=Date.now(); d.source='ws';
+    this.tradeCount++;
+    if(this.state!=='ONLINE') this.setState('ONLINE');
+    if(this.tradeCount===1 || this.tradeCount%200===0){
+      dbg('tick','TRADE '+t.product_id+' size='+(isFinite(size)?size:'?')+' @ $'+price.toLocaleString());
+    }
+    if(!this.paused && key===state.asset) applyTrade(key, price, isFinite(size)?size:0);
+  }
+};
+function tfCurrent(){ return TIMEFRAMES.find(t=>t.id===state.tfId)||TIMEFRAMES[2]; }
+
+let establishTimer=null, establishing=false;
+function scheduleEstablish(delay){
+  if(establishTimer) return;
+  Feed.attempts++;
+  const d=delay!=null?delay:Math.min(120000, 2000*Math.pow(2, Math.min(Math.max(0,Feed.attempts-1),6)));
+  dbg('warn','FEED RE-ESTABLISH scheduled in '+Math.round(d/1000)+'s (attempt #'+Feed.attempts+')');
+  $('stVal5').textContent=String(Feed.attempts);
+  establishTimer=setTimeout(()=>{ establishTimer=null; establishFeed(); }, d);
+}
+async function establishFeed(){
+  if(establishing) return;
+  establishing=true;
+  let adopted=false;
+  try{
+    if(Feed.state!=='ONLINE') Feed.setState('CONNECTING');
+    $('dbgMode').textContent='MODE: '+FeedConfig.mode.toUpperCase();
+    const http=await NetDiag.probeHttp();
+    if(http.cbOk===false && http.ctlOk===false){
+      NetDiag.report.relay='FAILED'; NetDiag.relayDetail='SKIPPED — outbound network is blocked in this environment';
+      NetDiag.report.coinbase='FAILED'; NetDiag.coinbaseDetail='SKIPPED — outbound network is blocked in this environment';
+      NetDiag.verdict='VERDICT: This preview environment blocks outbound WebSocket/DNS/network connections. Nothing can be forced from browser-side. Run the provided qwen-backend.js locally — then the frontend connects only to your own backend.';
+      NetDiag.render();
+      Feed.setState('OFFLINE');
+      Feed.lastCategory='ENVIRONMENT BLOCKS OUTBOUND NETWORK';
+      scheduleEstablish(120000);
+      return;
+    }
+    const candidates=[];
+    if(FeedConfig.mode!=='direct' && (location.protocol==='http:'||location.protocol==='https:')){
+      candidates.push({ url:(location.protocol==='https:'?'wss://':'ws://')+location.host+'/feed', label:'SAME-ORIGIN BACKEND (/feed)', openTimeout:5000 });
+    }
+    if(FeedConfig.mode!=='direct'){
+      candidates.push({ url:FeedConfig.relayUrl, label:'CONFIGURED RELAY', openTimeout:8000 });
+    }
+    for(const c of candidates){
+      const parts=urlParts(c.url);
+      dbg('info','RELAY PROBE ('+c.label+') → '+redactUrl(c.url)+' — hostname='+parts.hostname+' port='+parts.port);
+      const r=await Probe.run(c.url, true, {openTimeout:c.openTimeout});
+      if(r.ok){
+        adopted=true;
+        NetDiag.report.relay='SUCCESS'; NetDiag.relayDetail=redactUrl(c.url)+' — OPEN → hello → BTC/ETH/SOL tickers received';
+        break;
+      }
+      NetDiag.report.relay='FAILED'; NetDiag.relayDetail=redactUrl(c.url)+' — '+r.category;
+    }
+    NetDiag.render();
+    if(!adopted && FeedConfig.mode!=='relay'){
+      const r=await Probe.run(WS_URL, false, {openTimeout:10000});
+      if(r.ok){
+        adopted=true;
+        NetDiag.report.coinbase='SUCCESS'; NetDiag.coinbaseDetail='OPEN → subscription accepted → BTC/ETH/SOL tickers received';
+      } else {
+        NetDiag.report.coinbase='FAILED'; NetDiag.coinbaseDetail=r.category;
+      }
+    }
+    NetDiag.render();
+    if(adopted){
+      NetDiag.verdict='FEED OPERATIONAL — WebSocket verified end-to-end and promoted to the live feed. Real ticker messages are being received.';
+      NetDiag.report.ticker='RECEIVING';
+      NetDiag.render();
+      $('stVal5').textContent='0';
+    } else if(http.cbOk){
+      NetDiag.verdict='VERDICT: outbound HTTPS works but every WebSocket path failed in this environment (CSP/sandbox typically allows fetch but not wss). REST POLLING MODE activated with REAL Coinbase prices — clearly labeled, not simulated streaming.';
+      NetDiag.render();
+      RestPoller.start();
+      scheduleEstablish(60000);
+    } else {
+      NetDiag.verdict='VERDICT: Coinbase HTTPS reachable failed while general internet works — Coinbase endpoints appear blocked in this environment. No real data source is currently reachable. Run qwen-backend.js locally.';
+      NetDiag.render();
+      Feed.setState('OFFLINE');
+      Feed.lastCategory='COINBASE ENDPOINTS BLOCKED IN ENVIRONMENT';
+      scheduleEstablish(90000);
+    }
+    feedPillUI();
+  } finally {
+    establishing=false;
+  }
+}
+
+function applyTrade(key, price, size){
+  const tf=tfCurrent();
+  const d=marketData[key];
+  const bucket=Math.floor(Date.now()/1000/tf.sec)*tf.sec;
+  const arr=d.candles; if(!arr.length) return;
+  const last=arr[arr.length-1];
+  if(bucket>last.time){
+    arr.push({ time:bucket, open:last.close, high:Math.max(last.close,price), low:Math.min(last.close,price), close:price, volume:size });
+    if(arr.length>420) arr.shift();
+    d.candleStamp=Date.now();
+    Bus.emit('candleClose', key);
+  } else if(bucket===last.time){
+    last.high=Math.max(last.high,price); last.low=Math.min(last.low,price); last.close=price; last.volume+=size;
+  } else return;
+  Bus.emit('candles', key);
+}
+
+/* ── TradingView: visualization only ── */
+const TV_INTERVAL_MAP = { '1m':'1', '5m':'5', '15m':'15', '1H':'60', '4H':'240', '1D':'D' };
+const TVChart = {
+  timer:null, ok:false,
+  buildStudies(){
+    const st=[];
+    if(indVis.ema20)  st.push({ id:'MAExp@tv-basicstudies', inputs:{ length:20 } });
+    if(indVis.ema50)  st.push({ id:'MAExp@tv-basicstudies', inputs:{ length:50 } });
+    if(indVis.ema200) st.push({ id:'MAExp@tv-basicstudies', inputs:{ length:200 } });
+    if(indVis.vwap)   st.push('VWAP@tv-basicstudies');
+    if(indVis.bb)     st.push({ id:'BB@tv-basicstudies', inputs:{ length:20, mult:2 } });
+    if(indVis.rsi)    st.push({ id:'RSI@tv-basicstudies', inputs:{ length:14 } });
+    if(indVis.macd)   st.push('MACD@tv-basicstudies');
+    return st;
+  },
+  coverLoad(txt){
+    $('chartCover').classList.remove('hidden');
+    $('chartCoverLoad').classList.remove('hidden');
+    $('chartCoverErr').classList.add('hidden');
+    $('chartCoverTxt').textContent=txt;
+  },
+  showErr(){
+    $('chartCover').classList.remove('hidden');
+    $('chartCoverLoad').classList.add('hidden');
+    $('chartCoverErr').classList.remove('hidden');
+    this.setOk(false);
+  },
+  hideCover(){ $('chartCover').classList.add('hidden'); },
+  setOk(ok){
+    this.ok=ok;
+    const d=$('stDotTv'), v=$('stValTv');
+    if(ok){ d.className='dot bg-bull pulse'; v.textContent='CONNECTED'; v.className='text-bull'; }
+    else  { d.className='dot bg-bear'; v.textContent='UNAVAILABLE'; v.className='text-bear'; }
+  },
+  render(key, tfId){
+    const host=$('tvChart');
+    host.innerHTML='';
+    this.coverLoad('LOADING '+ASSETS[key].pair+' CHART…');
+    if(this.timer){ clearInterval(this.timer); this.timer=null; }
+    const meta=TV_META[key];
+    $('chTvFeed').textContent=meta.note;
+    const wrap=document.createElement('div');
+    wrap.className='tradingview-widget-container';
+    wrap.style.cssText='height:100%;width:100%';
+    const inner=document.createElement('div');
+    inner.className='tradingview-widget-container__widget';
+    inner.style.cssText='height:calc(100% - 32px);width:100%';
+    wrap.appendChild(inner);
+    const copyright=document.createElement('div');
+    copyright.className='tradingview-widget-copyright';
+    copyright.innerHTML='<a href="'+meta.url+'" rel="noopener nofollow" target="_blank"><span class="blue-text">'+meta.text+'</span></a><span class="trademark"> by TradingView</span>';
+    wrap.appendChild(copyright);
+    const s=document.createElement('script');
+    s.type='text/javascript';
+    s.src='https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    s.async=true;
+    s.textContent=JSON.stringify({
+      allow_symbol_change:true, calendar:false, details:false, hide_side_toolbar:true,
+      hide_top_toolbar:false, hide_legend:false, hide_volume:false, hotlist:false,
+      interval:TV_INTERVAL_MAP[tfId]||'D', locale:'en', save_image:true, style:'1',
+      symbol:TRADINGVIEW_SYMBOLS[key], theme:'dark', timezone:'Etc/UTC',
+      backgroundColor:'#0F0F0F', gridColor:'rgba(242, 242, 242, 0.2)',
+      watchlist:[], withdateranges:false, compareSymbols:[],
+      support_host:'https://www.tradingview.com', studies:this.buildStudies(), autosize:true
+    });
+    wrap.appendChild(s);
+    host.appendChild(wrap);
+    let tries=0;
+    this.timer=setInterval(()=>{
+      if(host.querySelector('iframe')){ clearInterval(this.timer); this.timer=null; this.hideCover(); this.setOk(true); }
+      else if(++tries>40){ clearInterval(this.timer); this.timer=null; this.showErr(); }
+    }, 300);
+  }
+};
+
+/* ── state + UI ── */
+const Stores = { BTC:{}, ETH:{}, SOL:{} };
+const state = { asset:'BTC', tfId:'15m', analysis:null, plan:null, history:[], shownPrice:null, planGenAt:0, lastRegenCooldown:0, curSig:null };
+const indVis = { ema20:true, ema50:true, ema200:true, vwap:true, bb:false, rsi:false, macd:false };
+let throttles = { analysis:0, watchBridge:0, priceUI:0 };
+
+function buildSelector(){
+  $('assetSelector').innerHTML = ASSET_KEYS.map(k=>{
+    const c=ASSETS[k];
+    return '<button data-asset="'+k+'" class="assetCard panel p-3 sm:p-3.5 text-left relative overflow-hidden">'+
+      '<div class="flex items-center gap-2 sm:gap-2.5 min-w-0">'+
+      '<span class="w-8 h-8 sm:w-9 sm:h-9 rounded-lg grid place-items-center flex-none bg-white/[0.04] border border-white/10">'+logoTag(k, 22)+'</span>'+
+      '<div class="leading-none min-w-0">'+
+      '<div class="font-bold text-[11.5px] sm:text-[12.5px] tracking-wider text-slate-200 truncate">'+c.pair+'</div>'+
+      '<div class="text-[7.5px] sm:text-[8px] font-mono tracking-[.22em] text-mut mt-1">'+c.name.toUpperCase()+' · '+c.product+'</div>'+
+      '</div>'+
+      '<span id="selDot-'+k+'" class="dot bg-mut ml-auto"></span>'+
+      '</div>'+
+      '<div class="mt-2.5 sm:mt-3 flex items-end justify-between gap-2 min-w-0">'+
+      '<span id="selPrice-'+k+'" class="font-mono font-semibold text-[12.5px] sm:text-[15px] text-white whitespace-nowrap"><span class="shimmer inline-block h-4 w-16">&nbsp;</span></span>'+
+      '<span id="selPct-'+k+'" class="font-mono text-[9px] sm:text-[10.5px] px-1.5 py-[2px] rounded bg-white/5 text-mut whitespace-nowrap">N/A</span>'+
+      '</div>'+
+      '<div id="selBar-'+k+'" class="absolute bottom-0 left-0 right-0 h-[2px] transition-all" style="background:transparent"></div>'+
+      '</button>';
+  }).join('');
+  document.querySelectorAll('.assetCard').forEach(el=>el.addEventListener('click', ()=>switchAsset(el.dataset.asset)));
+}
+function freshAge(){ return Feed.state==='REST' ? 15000 : 20000; }
+function renderSelector(){
+  ASSET_KEYS.forEach(k=>{
+    const d=marketData[k], c=ASSETS[k];
+    const pe=$('selPrice-'+k), pc=$('selPct-'+k), dot=$('selDot-'+k);
+    if(d.price==null){
+      pe.innerHTML='<span class="shimmer inline-block h-4 w-16">&nbsp;</span>';
+      pc.textContent='N/A'; pc.className='font-mono text-[9px] sm:text-[10.5px] px-1.5 py-[2px] rounded bg-white/5 text-mut whitespace-nowrap';
+    } else {
+      pe.textContent=fmtSel(d.price, c.selDec);
+      const up=(d.change24h||0)>=0;
+      pc.textContent=d.change24h==null?'N/A':fmtPct(d.change24h);
+      pc.className='font-mono text-[9px] sm:text-[10.5px] px-1.5 py-[2px] rounded whitespace-nowrap '+(d.change24h==null?'bg-white/5 text-mut': up?'bg-bull/10 text-bull':'bg-bear/10 text-bear');
+    }
+    const fresh=d.lastUpdate && (Date.now()-d.lastUpdate)<freshAge();
+    dot.className='dot ml-auto '+(fresh?'bg-bull pulse': Feed.state==='OFFLINE'?'bg-bear':'bg-mut');
+  });
+  highlightActive();
+}
+function highlightActive(){
+  document.querySelectorAll('.assetCard').forEach(el=>{
+    const on=el.dataset.asset===state.asset;
+    el.classList.toggle('active', on);
+    const c=ASSETS[el.dataset.asset];
+    el.style.borderColor = on ? c.color+'66' : '';
+    el.style.boxShadow = on ? '0 0 0 1px '+c.color+'33, 0 0 34px -10px '+c.color+'55' : '';
+    $('selBar-'+el.dataset.asset).style.background = on ? c.color : 'transparent';
+  });
+  document.querySelectorAll('.watchRow').forEach(el=>el.classList.toggle('active', el.dataset.asset===state.asset));
+}
+function renderWatchlist(){
+  $('watchBody').innerHTML = ASSET_KEYS.map(k=>{
+    const d=marketData[k], c=ASSETS[k];
+    const price = d.price==null ? 'N/A' : fmtSel(d.price, c.selDec);
+    const pctTxt = d.change24h==null ? 'N/A' : fmtPct(d.change24h);
+    const pctCls = d.change24h==null?'text-mut': d.change24h>=0?'text-bull':'text-bear';
+    const fresh=d.lastUpdate && (Date.now()-d.lastUpdate)<freshAge();
+    const sigSrc = (k===state.asset && state.analysis) ? { signal:state.analysis.signal, conf:state.analysis.confidence } : d.watchSig;
+    let sig='<span class="text-mut">—</span>';
+    if(sigSrc && sigSrc.signal){
+      const m={ BUY:[C.bull,'rgba(14,203,129,.08)','rgba(14,203,129,.28)','▲'], SELL:[C.bear,'rgba(246,70,93,.08)','rgba(246,70,93,.28)','▼'], WAIT:[C.warn,'rgba(240,185,11,.08)','rgba(240,185,11,.28)','◆'] }[sigSrc.signal];
+      sig='<span class="text-[9px] font-semibold tracking-wider px-1.5 py-[3px] rounded-md border" style="color:'+m[0]+';background:'+m[1]+';border-color:'+m[2]+'">'+m[3]+' '+sigSrc.signal+(sigSrc.conf?' '+sigSrc.conf+'%':'')+'</span>';
+    }
+    return '<div data-asset="'+k+'" class="watchRow flex items-center justify-between gap-2 px-2 py-2.5 rounded-lg border-l-2" style="border-left-color:'+(k===state.asset?c.color:'transparent')+'">'+
+      '<span class="flex items-center gap-2 min-w-0 w-[96px] flex-none">'+logoTag(k,18)+
+      '<span class="text-[11px] font-mono text-slate-300 truncate">'+c.pair+'</span></span>'+
+      '<span class="font-mono text-[11.5px] text-slate-100 flex-1 text-right whitespace-nowrap">'+price+'</span>'+
+      '<span class="font-mono text-[10.5px] '+pctCls+' w-[58px] text-right flex-none">'+pctTxt+'</span>'+
+      '<span class="w-[92px] text-right flex-none hidden sm:flex items-center justify-end gap-1.5"><span class="dot '+(fresh?'bg-bull pulse':Feed.state==='OFFLINE'?'bg-bear':'bg-mut')+'"></span>'+sig+'</span>'+
+      '</div>';
+  }).join('');
+  highlightActive();
+}
+function renderWatchStatus(){
+  const el=$('watchLive');
+  if(Feed.state==='ONLINE') el.innerHTML='<span class="dot bg-bull pulse"></span><span class="text-bull">LIVE</span>';
+  else if(Feed.state==='REST') el.innerHTML='<span class="dot bg-warn pulse"></span><span class="text-warn">REST POLLING</span>';
+  else if(Feed.state==='OFFLINE') el.innerHTML='<span class="dot bg-bear pulse"></span><span class="text-bear">FEED OFFLINE</span>';
+  else if(Feed.state==='RECONNECTING') el.innerHTML='<span class="dot bg-warn pulse"></span><span class="text-warn">RECONNECTING</span>';
+  else el.innerHTML='<span class="dot bg-warn pulse"></span><span class="text-warn">CONNECTING</span>';
+}
+document.addEventListener('click', e=>{
+  const row=e.target.closest('.watchRow');
+  if(row) switchAsset(row.dataset.asset);
+});
+
+function updatePriceUI(){
+  const d=marketData[state.asset];
+  const p=d.price;
+  if(p==null){
+    $('hdrPrice').textContent='N/A'; $('chPrice').textContent='N/A';
+    $('hdrPct').textContent=d.change24h==null?'N/A':fmtPct(d.change24h);
+    $('chPct').textContent=d.change24h==null?'N/A':fmtPct(d.change24h);
+    return;
+  }
+  const prev = state.shownPrice; state.shownPrice = p;
+  const txt = fmt$(p);
+  ['hdrPrice','chPrice'].forEach(id=>{
+    const el = $(id);
+    if(prev!=null && Math.abs(p-prev)>1e-9){
+      el.classList.remove('flash-up','flash-dn'); void el.offsetWidth;
+      el.classList.add(p>prev?'flash-up':'flash-dn');
+    }
+    el.textContent = txt;
+  });
+  const pctTxt = d.change24h==null ? 'N/A' : fmtPct(d.change24h);
+  const up=(d.change24h||0)>=0;
+  ['hdrPct','chPct'].forEach(id=>{
+    const el=$(id);
+    el.textContent=pctTxt;
+    el.className = 'font-mono px-1.5 py-[2px] rounded '+(d.change24h==null?'bg-white/5 text-mut': up?'bg-bull/10 text-bull':'bg-bear/10 text-bear')+' '+(id==='chPct'?'text-[12px]':'text-[10.5px]');
+  });
+}
+function isStale(){
+  const d=marketData[state.asset];
+  const limit = Feed.state==='REST' ? 25000 : 30000;
+  return d.lastUpdate!=null && (Date.now()-d.lastUpdate>limit);
+}
+function feedPillUI(){
+  const st=Feed.state;
+  let txt, dotCls, pillCls;
+  if(Feed.paused){ txt='PAUSED'; dotCls='bg-warn'; pillCls='text-warn border-warn/30 bg-warn/[0.07]'; }
+  else if(st==='CONNECTING'){ txt='CONNECTING TO LIVE FEED'; dotCls='bg-warn pulse'; pillCls='text-warn border-warn/30 bg-warn/[0.07]'; }
+  else if(st==='ONLINE'){ txt='LIVE'; dotCls='bg-bull pulse'; pillCls='text-bull border-bull/30 bg-bull/[0.07]'; }
+  else if(st==='REST'){ txt='REST POLLING · REAL DATA'; dotCls='bg-warn pulse'; pillCls='text-warn border-warn/30 bg-warn/[0.07]'; }
+  else if(st==='RECONNECTING'){ txt='RECONNECTING…'; dotCls='bg-warn pulse'; pillCls='text-warn border-warn/30 bg-warn/[0.07]'; }
+  else { txt='LIVE FEED OFFLINE'; dotCls='bg-bear pulse'; pillCls='text-bear border-bear/40 bg-bear/10'; }
+  $('feedTxt').textContent=txt; $('feedDot').className='dot '+dotCls;
+  $('feedPill').className='hidden sm:flex items-center gap-1.5 text-[9.5px] font-mono tracking-widest rounded-full px-2.5 py-1 border '+pillCls;
+  $('feedPill').title = Feed.lastCategory ? ('Last failure: '+Feed.lastCategory) : '';
+  const so=$('sysOnlineDot'), sot=$('sysOnlineTxt');
+  so.className='dot '+dotCls; sot.textContent=txt;
+  $('sysOnline').className='hidden sm:flex items-center gap-1.5 ml-1 text-[9.5px] font-mono tracking-widest rounded-full px-2.5 py-1 border '+pillCls;
+  const chSt=$('chStatus');
+  if(st==='ONLINE') chSt.innerHTML='<span class="dot bg-bull pulse"></span><span class="text-bull">'+(Feed.isRelay?'BACKEND RELAY':'COINBASE ADVANCED TRADE')+' · LIVE</span>';
+  else if(st==='REST') chSt.innerHTML='<span class="dot bg-warn pulse"></span><span class="text-warn">REAL DATA VIA COINBASE REST (NON-STREAMING)</span>';
+  else if(st==='OFFLINE') chSt.innerHTML='<span class="dot bg-bear pulse"></span><span class="text-bear">LIVE FEED OFFLINE</span>';
+  else if(st==='RECONNECTING') chSt.innerHTML='<span class="dot bg-warn pulse"></span><span class="text-warn">RECONNECTING…</span>';
+  else chSt.innerHTML='<span class="dot bg-warn pulse"></span><span class="text-warn">CONNECTING TO LIVE FEED…</span>';
+  setStat(1, st==='ONLINE'?['WS '+(Feed.isRelay?'RELAY':'DIRECT'),'bull']: st==='REST'?['REST POLLING','warn']: st==='OFFLINE'?['OFFLINE','bear']: st==='RECONNECTING'?['RECONNECTING','warn']:['CONNECTING','warn']);
+  setStat(3, Feed.paused?['PAUSED','warn']: isStale()?['STALE DATA','warn']: (st==='ONLINE'||st==='REST')?['ACTIVE','bull']:['WAITING','warn']);
+  $('simBanner').classList.toggle('hidden', st!=='OFFLINE');
+  if(st!=='REST') $('restBanner').classList.add('hidden');
+  $('offlineReason').textContent = NetDiag.verdict.indexOf('VERDICT')===0 ? NetDiag.verdict.slice(8,140) : (Feed.lastCategory||'NO REAL DATA SOURCE REACHABLE');
+}
+function setStat(n, pair){
+  const txt=pair[0], tone=pair[1];
+  const dot=$('stDot'+n), val=$('stVal'+n);
+  val.textContent=txt;
+  const tones={ bull:'bg-bull pulse', warn:'bg-warn', mut:'bg-mut', bear:'bg-bear pulse' };
+  dot.className='dot '+(tones[tone]||tones.mut);
+  val.className = tone==='bull'?'text-bull': tone==='warn'?'text-warn': tone==='bear'?'text-bear':'text-mut';
+}
+function lastUpdUI(){
+  const d=marketData[state.asset];
+  const el1=$('hdrLastUpd'), el2=$('stVal4');
+  if(d.lastUpdate==null){ el1.textContent='N/A'; el2.textContent='N/A'; return; }
+  const sec=Math.floor((Date.now()-d.lastUpdate)/1000);
+  const txt = sec<3 ? 'just now' : sec<60 ? sec+' seconds ago' : Math.floor(sec/60)+'m ago';
+  el1.textContent=txt; el2.textContent=txt;
+  setStat(4,[txt, sec<10?'bull': sec<30?'warn':'bear']);
+}
+function updateLabels(){
+  const cfg=ASSETS[state.asset];
+  document.title = 'QWEN WATCHER — '+cfg.pair+' Market Intelligence';
+  $('hdrPairTxt').textContent=cfg.pair;
+  $('hdrPairLogo').innerHTML=logoTag(state.asset,16);
+  $('sigLogo').innerHTML=logoTag(state.asset,15);
+  $('chPair').textContent=cfg.pair;
+  $('sigPair').textContent=cfg.pair;
+  $('apPair').textContent=cfg.pair;
+  $('regPair').textContent=cfg.pair;
+  $('lvPair').textContent=cfg.pair;
+  $('mxPair').textContent=cfg.pair;
+  $('rsPair').textContent=cfg.pair;
+  $('hsPair').textContent=cfg.pair;
+  $('histTfNote').textContent='· '+state.tfId+' SESSION';
+}
+
+const SIG_META = {
+  BUY:{ glyph:'▲', word:'BUY', cls:'sig-bull glow-bull', bar:'bg-bull', border:'rgba(14,203,129,.3)' },
+  SELL:{ glyph:'▼', word:'SELL', cls:'sig-bear glow-bear', bar:'bg-bear', border:'rgba(246,70,93,.3)' },
+  WAIT:{ glyph:'◆', word:'WAIT', cls:'sig-warn glow-warn', bar:'bg-warn', border:'rgba(240,185,11,.3)' },
+};
+function renderSignal(a){
+  const m = SIG_META[a.signal], card=$('signalCard');
+  card.classList.remove('sig-bull','sig-bear','sig-warn','glow-bull','glow-bear','glow-warn');
+  card.classList.add.apply(card.classList, m.cls.split(' '));
+  const word=$('sigWord');
+  if(word.textContent!==m.word){ word.classList.remove('sig-pop'); void word.offsetWidth; word.classList.add('sig-pop'); }
+  word.textContent=m.word; $('sigGlyph').textContent=m.glyph;
+  $('sigConfBar').style.width=a.confidence+'%'; $('sigConfBar').className=m.bar;
+  $('sigConfTxt').textContent=a.confidence+'% confidence';
+  $('sigExplain').textContent='« '+a.explain+' »';
+  $('sigExplain').style.borderColor=m.border;
+  $('sigEntry').textContent = fmt$0(a.entryLow)+' — '+fmt$0(a.entryHigh);
+  $('sigStop').textContent = fmt$0(a.stop);
+  $('sigTarget').textContent = fmt$0(a.target);
+  state.curSig = a.signal;
+}
+function renderSignalPending(mode){
+  const card=$('signalCard');
+  card.classList.remove('sig-bull','sig-bear','glow-bull','glow-bear');
+  card.classList.add('sig-warn','glow-warn');
+  $('sigGlyph').textContent = mode==='insufficient' ? '⌀' : '◇';
+  $('sigWord').textContent = '—';
+  $('sigConfBar').style.width='0%';
+  $('sigConfTxt').textContent = mode==='insufficient' ? 'INSUFFICIENT LIVE DATA' : 'ANALYZING…';
+  $('sigExplain').textContent = mode==='insufficient'
+    ? '« Not enough live market data has been received yet to compute indicators. QWEN never invents values — waiting for the real feed. »'
+    : '« Waiting for verified live market data before generating a probabilistic signal. »';
+  $('sigEntry').textContent='N/A'; $('sigStop').textContent='N/A'; $('sigTarget').textContent='N/A';
+}
+function renderRegime(a){
+  const reg = a.regime;
+  const bull = reg.includes('BULLISH'), bear = reg.includes('BEARISH'), volat = reg==='HIGH VOLATILITY';
+  const color = bull?C.bull : bear?C.bear : C.warn;
+  const glyph = bull?'▲' : bear?'▼' : volat?'≈' : '◆';
+  $('regimeLabel').textContent=reg; $('regimeLabel').style.color=color;
+  const ic=$('regimeIcon');
+  ic.textContent=glyph; ic.style.color=color;
+  ic.style.background=color+'1a'; ic.style.borderColor=color+'40';
+  $('tsVal').textContent=a.strength+'/100';
+  const tsBar=$('tsBar'); tsBar.style.width=a.strength+'%';
+  tsBar.style.background = bull?C.bull : bear?C.bear : C.warn;
+  const vl=$('volLabel'); vl.textContent=a.volLabel.toUpperCase();
+  vl.className = 'px-2 py-[2px] rounded font-mono '+(a.volLabel==='Low'?'bg-white/5 text-slate-300': a.volLabel==='Moderate'?'bg-sky-500/10 text-sky-300': a.volLabel==='High'?'bg-warn/10 text-warn':'bg-bear/10 text-bear');
+  const ml=$('momLabel'); ml.textContent=a.momentum.toUpperCase();
+  ml.className = 'px-2 py-[2px] rounded font-mono '+(a.momentum==='Bullish'?'bg-bull/10 text-bull': a.momentum==='Bearish'?'bg-bear/10 text-bear':'bg-warn/10 text-warn');
+}
+function badge(sig){
+  const map={ BULLISH:['🟢 BULLISH','bg-bull/10 text-bull border-bull/25'], BEARISH:['🔴 BEARISH','bg-bear/10 text-bear border-bear/25'], NEUTRAL:['🟡 NEUTRAL','bg-warn/10 text-warn border-warn/25'] };
+  const t=(map[sig]||map.NEUTRAL)[0], c=(map[sig]||map.NEUTRAL)[1];
+  return '<span class="text-[9.5px] font-mono tracking-wider border rounded-md px-2 py-[3px] '+c+'">'+t+'</span>';
+}
+function renderMatrix(a){
+  $('matrixBody').innerHTML = a.matrix.map(r=>
+    '<div class="flex items-center justify-between px-2 sm:px-3 py-2.5 border-b last:border-0" style="border-color:var(--edge)">'+
+    '<span class="text-[12px] text-slate-300">'+r.name+'</span>'+
+    '<span class="font-mono text-[12px] text-slate-100">'+r.value+'</span>'+
+    badge(r.sig)+
+    '</div>').join('');
+}
+function renderReasoning(a){
+  $('reasonText').textContent = a.reasoning;
+  $('factorChips').innerHTML = a.factors.map(f=>{
+    const pos=f.impact>0;
+    return '<span class="text-[9.5px] font-mono px-2 py-1 rounded-md border '+(pos?'border-bull/25 bg-bull/[0.07] text-bull':'border-bear/25 bg-bear/[0.07] text-bear')+'">'+(pos?'+':'')+f.impact+' · '+f.label+'</span>';
+  }).join('');
+}
+function renderLevels(a){
+  const rows = [
+    ['CURRENT PRICE', fmt$(a.px), 'text-white'],
+    ['RESISTANCE', fmt$0(a.res), 'text-bear'],
+    ['SUPPORT', fmt$0(a.sup), 'text-bull'],
+    ['ENTRY ZONE', fmt$0(a.entryLow)+' – '+fmt$0(a.entryHigh), 'text-slate-100'],
+    ['STOP / INVALIDATION', fmt$0(a.stop), 'text-warn'],
+    ['TARGET', fmt$0(a.target), 'text-sky-300'],
+  ];
+  $('levelsBody').innerHTML = rows.map(rr=>
+    '<div class="flex items-center justify-between px-3 py-2.5 rounded-lg hover:bg-white/[0.03] transition">'+
+    '<span class="text-[9.5px] font-mono tracking-[.18em] text-mut">'+rr[0]+'</span>'+
+    '<span class="font-mono text-[12.5px] '+rr[2]+'">'+rr[1]+'</span>'+
+    '</div>').join('');
+}
+
+const DIR_META = {
+  BUY:{ title:'BUY WINDOW', icon:'🟢', color:C.bull },
+  SELL:{ title:'SELL / EXIT WATCH', icon:'🔴', color:C.bear },
+  WAIT:{ title:'WAIT', icon:'🟡', color:C.warn },
+};
+function planTexts(dir, a){
+  const base=a.base;
+  if(dir==='BUY') return {
+    condition: base+' holds above '+fmt$0(a.entryLow)+' while short-term momentum remains bullish'+(a.nearResistance?' — a confirmed break of '+fmt$0(a.res)+' with volume extends the setup':'')+'.',
+    action:'Consider entering a position within the defined entry zone, sized to your risk plan.' };
+  if(dir==='SELL') return {
+    condition: base+' falls below '+fmt$0(a.entryHigh)+' and bearish momentum increases toward '+fmt$0(a.sup)+'.',
+    action:'Consider reducing exposure or exiting according to your risk plan.' };
+  return {
+    condition: base+' has not yet confirmed a breakout — momentum is '+a.momentum.toLowerCase()+' and confirmation is insufficient.',
+    action:'Do not enter. Wait for confirmation of direction with volume.' };
+}
+function generatePlan(a){
+  const winSec = WINDOW_MIN[state.tfId]*60;
+  const nowS = Date.now()/1000;
+  const start = Math.floor(nowS/winSec)*winSec;
+  const seq = a.signal==='BUY' ? ['BUY','WAIT','SELL','WAIT'] : a.signal==='SELL' ? ['SELL','WAIT','BUY','WAIT'] : ['WAIT','BUY','WAIT','SELL'];
+  const offsets=[0,-7,4,-4];
+  state.plan = {
+    winSec, primaryDir:a.signal, stop:a.stop,
+    windows: seq.map((dir,k)=>{
+      const t = planTexts(dir,a);
+      return { start:start+k*winSec, end:start+(k+1)*winSec, dir,
+        confidence: clamp(a.confidence+offsets[k], 52, 93),
+        condition:t.condition, action:t.action,
+        status: k===0?'ACTIVE':'UPCOMING', min:null, max:null, invalidated:false, entryPrice:k===0?a.px:null };
+    })
+  };
+  state.planGenAt = Date.now();
+  renderPlan();
+}
+function renderPlan(){
+  const p = state.plan; if(!p) return;
+  $('planBody').innerHTML = p.windows.map((w,idx)=>{
+    const m = DIR_META[w.dir];
+    const active = w.status==='ACTIVE';
+    const inv = w.status==='INVALIDATED';
+    const done = w.status==='COMPLETED';
+    const shell = active ? 'bg-white/[0.025] glow-'+(w.dir==='BUY'?'bull':w.dir==='SELL'?'bear':'warn') : done||inv ? 'opacity-45' : '';
+    const stBadge = active ? '<span class="text-[8.5px] font-mono tracking-widest bg-bull/15 text-bull border border-bull/30 rounded px-1.5 py-[2px] pulse">● ACTIVE</span>'
+      : inv ? '<span class="text-[8.5px] font-mono tracking-widest bg-bear/10 text-bear border border-bear/30 rounded px-1.5 py-[2px]">INVALIDATED</span>'
+      : done ? '<span class="text-[8.5px] font-mono tracking-widest bg-white/5 text-mut border border-white/10 rounded px-1.5 py-[2px]">COMPLETED</span>'
+      : '<span class="text-[8.5px] font-mono tracking-widest bg-sky-500/10 text-sky-300 border border-sky-500/25 rounded px-1.5 py-[2px]">UPCOMING</span>';
+    return '<div class="plan-in rounded-xl border border-white/[0.06] '+shell+' p-3.5 sm:p-4 border-l-2" style="border-left-color:'+m.color+'; animation-delay:'+(idx*70)+'ms">'+
+      '<div class="flex items-center gap-2.5 flex-wrap">'+
+      '<span class="text-[13px]">'+m.icon+'</span>'+
+      '<span class="font-bold tracking-wider text-[13px]" style="color:'+m.color+'">'+m.title+'</span>'+
+      '<span class="font-mono text-[11px] text-mut">'+hhmm(w.start)+' — '+hhmm(w.end)+'</span>'+
+      '<div class="flex-1"></div>'+stBadge+
+      '</div>'+
+      '<div class="grid sm:grid-cols-2 gap-x-6 gap-y-2 mt-3 text-[12px] leading-relaxed">'+
+      '<div><span class="text-[9px] font-mono tracking-widest text-mut block mb-1">CONDITION</span><span class="text-slate-300">'+w.condition+'</span></div>'+
+      '<div><span class="text-[9px] font-mono tracking-widest text-mut block mb-1">ACTION</span><span class="text-slate-400">'+w.action+'</span></div>'+
+      '</div>'+
+      '<div class="flex items-center gap-2.5 mt-3">'+
+      '<span class="text-[9px] font-mono tracking-widest text-mut">CONFIDENCE</span>'+
+      '<div class="meter flex-1 max-w-[160px]"><i style="width:'+w.confidence+'%; background:'+m.color+'"></i></div>'+
+      '<span class="font-mono text-[11px] text-slate-200">'+w.confidence+'%</span>'+
+      '</div></div>';
+  }).join('');
+}
+function renderCountdown(){
+  const p=state.plan; if(!p) return;
+  const nowS=Date.now()/1000, w=p.windows[0];
+  const remain=Math.max(0, w.end-nowS), total=w.end-w.start;
+  const el=clamp((1-remain/total)*100,0,100);
+  let str;
+  if(remain>=3600){ const h=Math.floor(remain/3600), m2=Math.floor((remain%3600)/60), s2=Math.floor(remain%60); str=String(h).padStart(2,'0')+':'+String(m2).padStart(2,'0')+':'+String(s2).padStart(2,'0'); }
+  else { const m2=Math.floor(remain/60), s2=Math.floor(remain%60); str=String(m2).padStart(2,'0')+':'+String(s2).padStart(2,'0'); }
+  $('cdNum').textContent=str;
+  $('cdClose').textContent=ASSETS[state.asset].pair+' window closes at '+hhmm(w.end);
+  const bar=$('cdBar'); bar.style.width=el+'%';
+  bar.style.background = DIR_META[w.dir].color;
+}
+function pushHistory(row){
+  state.history.unshift(row);
+  if(state.history.length>14) state.history.pop();
+  Stores[state.asset].history=state.history;
+  renderHistory();
+}
+function renderHistory(){
+  if (window.QWEN_LEDGER_UI) return;
+  const rows=state.history;
+  $('histTfNote').textContent = '· '+ASSETS[state.asset].pair+' · '+state.tfId+' SESSION';
+  if(!rows.length){
+    $('histRows').innerHTML='<tr><td colspan="5" class="px-5 py-8 text-center text-mut text-[11px] tracking-widest">RECORDING SIGNALS…</td></tr>';
+    return;
+  }
+  $('histRows').innerHTML = rows.map(r=>{
+    const m=SIG_META[r.signal];
+    const resCls = r.result==='Invalidated' ? 'text-bear' : r.result==='Closed' ? 'text-mut' : 'text-sky-300';
+    const col = r.signal==='BUY'?C.bull:r.signal==='SELL'?C.bear:C.warn;
+    const bg = r.signal==='BUY'?'rgba(14,203,129,.08)':r.signal==='SELL'?'rgba(246,70,93,.08)':'rgba(240,185,11,.08)';
+    return '<tr class="border-b last:border-0 hover:bg-white/[0.02]" style="border-color:var(--edge)">'+
+      '<td class="px-4 sm:px-5 py-2.5 text-slate-400">'+hhmm(r.time)+'</td>'+
+      '<td class="py-2.5"><span class="text-[10px] font-semibold tracking-wider px-2 py-[3px] rounded-md border" style="color:'+col+'; border-color:'+col+'44; background:'+bg+'">'+m.glyph+' '+r.signal+'</span></td>'+
+      '<td class="py-2.5 text-slate-200">'+fmt$0(r.price)+'</td>'+
+      '<td class="py-2.5 text-slate-300">'+r.confidence+'%</td>'+
+      '<td class="py-2.5 pr-4 sm:pr-5 text-right '+resCls+'">'+r.result+'</td>'+
+      '</tr>';
+  }).join('');
+}
+function backfillHistory(){
+  if (window.QWEN_LEDGER_UI) return;
+  const tf = tfCurrent();
+  const candles = marketData[state.asset].candles;
+  const winC = Math.max(3, Math.round(WINDOW_MIN[state.tfId]*60/tf.sec));
+  const N=candles.length;
+  const rows=[];
+  for(let k=8;k>=1;k--){
+    const idx = N - k*winC;
+    if(idx<230 || idx+winC>N-2) continue;
+    const a = analyze(candles.slice(0,idx), state.tfId, ASSETS[state.asset].base);
+    if(!a) continue;
+    const winSlice = candles.slice(idx, idx+winC);
+    let result='Closed';
+    if(a.signal==='BUY' && Math.min.apply(null,winSlice.map(c=>c.low))<a.stop) result='Invalidated';
+    if(a.signal==='SELL' && Math.max.apply(null,winSlice.map(c=>c.high))>a.stop) result='Invalidated';
+    rows.push({ time:candles[idx-1].time, signal:a.signal, price:a.px, confidence:a.confidence, result });
+  }
+  state.history=rows.reverse();
+  Stores[state.asset].history=state.history;
+  Stores[state.asset].backfilled=true;
+  renderHistory();
+}
+
+function beginAssetLoading(){
+  state.shownPrice=null;
+  $('hdrPrice').textContent='—';
+  $('chPrice').innerHTML='<span class="shimmer inline-block h-6 w-32">&nbsp;</span>';
+  $('hdrPct').textContent='—'; $('hdrPct').className='font-mono text-[10.5px] px-1.5 py-[2px] rounded bg-white/5 text-mut';
+  $('chPct').textContent='—'; $('chPct').className='font-mono text-[12px] px-1.5 py-[2px] rounded bg-white/5 text-mut';
+}
+async function ensureCandles(key, tf){
+  const d=marketData[key];
+  if(d.candles.length>60 && Date.now()-d.candleStamp<120000 && d.candleTf===tf.id) return false;
+  const arr=await loadCandles(key, tf);
+  if(key!==state.asset) return true;
+  if(arr && arr.length){
+    if(!Stores[key].backfilled || Stores[key].tf!==state.tfId){ backfillHistory(); }
+    runAnalysis(true);
+  } else renderSignalPending('insufficient');
+  return true;
+}
+function switchAsset(key, opts){
+  opts=opts||{};
+  if(!ASSETS[key]) return;
+  if(key===state.asset && !opts.force){ highlightActive(); return; }
+  if(!opts.initial){
+    Stores[state.asset].plan=state.plan;
+    Stores[state.asset].history=state.history;
+    Stores[state.asset].analysis=state.analysis;
+    Stores[state.asset].tf=state.tfId;
+  }
+  state.asset=key;
+  persistAsset(key);
+  state.analysis=null;
+  updateLabels();
+  beginAssetLoading();
+  highlightActive();
+  const st=Stores[key]||(Stores[key]={});
+  if(st.tf && st.tf!==state.tfId){ st.history=[]; st.backfilled=false; st.plan=null; st.analysis=null; }
+  state.plan=st.plan||null; state.history=st.history||[];
+  if(state.plan) renderPlan();
+  else $('planBody').innerHTML='<div class="shimmer h-24 rounded-xl">&nbsp;</div><div class="shimmer h-24 rounded-xl">&nbsp;</div>';
+  renderHistory();
+  renderSignalPending('analyzing');
+  TVChart.render(key, state.tfId);
+  Feed.switchTrades(key);
+  const d=marketData[key];
+  if(d.candles.length && d.candleTf===state.tfId && Date.now()-d.candleStamp<120000){
+    updatePriceUI(); runAnalysis(true);
+  } else {
+    ensureCandles(key, tfCurrent());
+  }
+  updatePriceUI();
+  feedPillUI();
+  if(!opts.initial) toast('SWITCHED TO '+ASSETS[key].pair, 'info');
+}
+
+function runAnalysis(full){
+  const d=marketData[state.asset];
+  if(!d.candles.length){ renderSignalPending('analyzing'); return; }
+  if(d.candles.length<60){ renderSignalPending('insufficient'); return; }
+  if(isStale() && !full){ $('staleBadge').classList.remove('hidden'); return; }
+  const a = analyze(d.candles, state.tfId, ASSETS[state.asset].base);
+  if(!a){ renderSignalPending('insufficient'); return; }
+  state.analysis=a;
+  Stores[state.asset].analysis=a;
+  $('staleBadge').classList.toggle('hidden', !isStale());
+  renderSignal(a); renderRegime(a); renderMatrix(a); renderReasoning(a); renderLevels(a);
+  renderWatchlist();
+  if(full || !state.plan) generatePlan(a);
+  else {
+    const p=state.plan, w=p.windows[0];
+    const now=Date.now();
+    const flipped = (p.primaryDir==='BUY'&&a.signal==='SELL') || (p.primaryDir==='SELL'&&a.signal==='BUY');
+    if(flipped && a.confidence>=66 && now-state.lastRegenCooldown>45000 && w && w.status==='ACTIVE'){
+      w.status='INVALIDATED';
+      pushHistory({ time:w.start, signal:w.dir, price:state.shownPrice||a.px, confidence:w.confidence, result:'Invalidated' });
+      state.lastRegenCooldown=now;
+      generatePlan(a);
+      toast(ASSETS[state.asset].base+' SIGNAL FLIP — PLAN REGENERATED ('+a.signal+')', a.signal==='BUY'?'bull':'bear');
+    }
+  }
+}
+function refreshAnalysis(manual){
+  runAnalysis(true);
+  if(state.analysis && state.plan){
+    state.lastRegenCooldown=Date.now();
+    if(manual) toast('ANALYSIS REFRESHED — '+state.analysis.signal+' '+state.analysis.confidence+'%', state.analysis.signal==='BUY'?'bull':state.analysis.signal==='SELL'?'bear':'warn');
+  }
+}
+function evaluateWindow(w){
+  let result='Closed';
+  if(w.invalidated||w.status==='INVALIDATED') result='Invalidated';
+  else if(state.analysis){
+    if(w.dir==='BUY' && w.min!=null && w.min<state.analysis.stop) result='Invalidated';
+    if(w.dir==='SELL' && w.max!=null && w.max>state.analysis.stop) result='Invalidated';
+  }
+  pushHistory({ time:w.start, signal:w.dir, price:w.entryPrice||state.shownPrice||0, confidence:w.confidence, result });
+}
+
+Bus.on('ticker', key=>{
+  const now=performance.now();
+  if(key===state.asset && now-throttles.priceUI>400){ throttles.priceUI=now; updatePriceUI(); }
+  if(now-throttles.watchBridge>1000){ throttles.watchBridge=now; renderSelector(); renderWatchlist(); renderWatchStatus(); }
+});
+Bus.on('candles', key=>{
+  if(key!==state.asset) return;
+  const now=performance.now();
+  if(now-throttles.analysis>2400){ throttles.analysis=now; runAnalysis(false); }
+  if(now-throttles.priceUI>400){ throttles.priceUI=now; updatePriceUI(); }
+  const p=state.plan;
+  const d=marketData[key];
+  const last=d.candles[d.candles.length-1];
+  if(p && p.windows[0] && last){
+    const w=p.windows[0];
+    w.min = w.min==null ? last.low : Math.min(w.min, last.low);
+    w.max = w.max==null ? last.high : Math.max(w.max, last.high);
+    if(state.analysis){
+      if(w.dir==='BUY' && last.close<state.analysis.stop) w.invalidated=true;
+      if(w.dir==='SELL' && last.close>state.analysis.stop) w.invalidated=true;
+    }
+  }
+});
+Bus.on('candleClose', key=>{ if(key===state.asset) runAnalysis(true); });
+Bus.on('feedState', ()=>{ feedPillUI(); renderWatchStatus(); renderSelector(); });
+
+setInterval(()=>{
+  renderCountdown();
+  lastUpdUI();
+  feedPillUI();
+  $('staleBadge').classList.toggle('hidden', !isStale());
+  $('ftClock').textContent = new Date().toUTCString().slice(17,25)+' UTC';
+  Feed.watchdog();
+  if(Debug.open){
+    const lastMsg = Feed.lastMsgAt ? Math.floor((Date.now()-Feed.lastMsgAt)/1000)+'s ago' : 'never';
+    $('dbgStats').textContent = 'STATE: '+Feed.state+' · ATTEMPTS: '+Feed.attempts+' · LAST MSG: '+lastMsg+' · TICKERS: BTC '+Feed.msgCount.BTC+' · ETH '+Feed.msgCount.ETH+' · SOL '+Feed.msgCount.SOL+' · TRADES: '+Feed.tradeCount;
+  }
+  const p=state.plan;
+  if(p && p.windows[0]){
+    const nowS=Date.now()/1000, w=p.windows[0];
+    if(nowS>=w.end){
+      evaluateWindow(w);
+      runAnalysis(true);
+      toast(ASSETS[state.asset].pair+' SIGNAL WINDOW EXPIRED — RE-ANALYZED', 'info');
+    } else if(w.status==='ACTIVE' && w.invalidated && nowS-state.planGenAt>5){
+      w.status='INVALIDATED';
+      evaluateWindow(w);
+      runAnalysis(true);
+      toast('WINDOW INVALIDATED — PRICE CROSSED STOP', 'bear');
+    }
+  }
+}, 1000);
+
+function buildTFButtons(){
+  $('tfBtns').innerHTML = TIMEFRAMES.map(t=>'<button data-tf="'+t.id+'" class="tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(t.id===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300')+'">'+t.label+'</button>').join('');
+  document.querySelectorAll('.tfbtn').forEach(b=>b.addEventListener('click', ()=>{
+    if(b.dataset.tf===state.tfId) return;
+    state.tfId=b.dataset.tf;
+    document.querySelectorAll('.tfbtn').forEach(x=>x.className='tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(x.dataset.tf===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300'));
+    ASSET_KEYS.forEach(k=>{
+      const s=Stores[k]||(Stores[k]={}); s.history=[]; s.backfilled=false; s.plan=null;
+      marketData[k].candles=[]; marketData[k].candleStamp=0; marketData[k].candleTf=null; marketData[k].watchSig=null;
+    });
+    state.plan=null; state.history=[];
+    $('planBody').innerHTML='<div class="shimmer h-24 rounded-xl">&nbsp;</div>';
+    renderHistory();
+    renderSignalPending('analyzing');
+    TVChart.render(state.asset, state.tfId);
+    dbg('info','TIMEFRAME CHANGED → '+state.tfId+' — reloading candle history via REST');
+    ensureCandles(state.asset, tfCurrent());
+    restRefreshInactive();
+  }));
+}
+let tvRebuildTimer=null;
+document.querySelectorAll('.indchip').forEach(b=>b.addEventListener('click', ()=>{
+  indVis[b.dataset.ind]=!indVis[b.dataset.ind];
+  b.classList.toggle('ind-on', indVis[b.dataset.ind]);
+  b.classList.toggle('text-mut', !indVis[b.dataset.ind]);
+  b.classList.toggle('text-slate-300', indVis[b.dataset.ind]);
+  clearTimeout(tvRebuildTimer);
+  tvRebuildTimer=setTimeout(()=>TVChart.render(state.asset, state.tfId), 250);
+}));
+$('refreshBtn').addEventListener('click', ()=>refreshAnalysis(true));
+$('chartRetry').addEventListener('click', ()=>TVChart.render(state.asset, state.tfId));
+$('fsBtn').addEventListener('click', ()=>{
+  if(document.fullscreenElement) document.exitFullscreen();
+  else if($('chartPanel').requestFullscreen) $('chartPanel').requestFullscreen();
+});
+$('pauseBtn').addEventListener('click', ()=>{
+  Feed.paused=!Feed.paused;
+  $('icoPause').classList.toggle('hidden', Feed.paused);
+  $('icoPlay').classList.toggle('hidden', !Feed.paused);
+  feedPillUI();
+  if(!Feed.paused){ ensureCandles(state.asset, tfCurrent()); fetchInitialStats(state.asset).then(()=>updatePriceUI()); }
+  dbg('info', Feed.paused?'UI UPDATES PAUSED (connections stay open)':'UI UPDATES RESUMED');
+  toast(Feed.paused?'QWEN DATA UPDATES PAUSED':'QWEN DATA UPDATES RESUMED', Feed.paused?'warn':'bull');
+});
+$('debugBtn').addEventListener('click', ()=>Debug.toggle());
+$('dbgClose').addEventListener('click', ()=>Debug.toggle(false));
+$('dbgClear').addEventListener('click', ()=>{ Debug.lines=[]; $('debugLog').innerHTML=''; });
+$('runDiagBtn').addEventListener('click', ()=>{
+  dbg('info','MANUAL DIAGNOSTICS RE-RUN REQUESTED');
+  if(Feed.ws){ try{ Feed.ws.onclose=null; Feed.ws.close(); }catch(e){} Feed.ws=null; }
+  RestPoller.stop();
+  if(establishTimer){ clearTimeout(establishTimer); establishTimer=null; }
+  Feed.attempts=0; Feed.setState('CONNECTING');
+  establishFeed();
+});
+document.querySelectorAll('[data-collapse]').forEach(btn=>btn.addEventListener('click', ()=>{
+  const body=$(btn.dataset.collapse); const chev=btn.querySelector('.chev');
+  body.classList.toggle('hidden'); chev.classList.toggle('closed', body.classList.contains('hidden'));
+}));
+$('settingsBtn').addEventListener('click', ()=>{
+  document.querySelectorAll('input[name="feedMode"]').forEach(r=>{ r.checked = r.value===FeedConfig.mode; });
+  $('relayUrlInput').value=FeedConfig.relayUrl;
+  $('settingsModal').classList.remove('hidden');
+});
+$('settingsClose').addEventListener('click', ()=>$('settingsModal').classList.add('hidden'));
+$('settingsBackdrop').addEventListener('click', ()=>$('settingsModal').classList.add('hidden'));
+$('settingsApply').addEventListener('click', ()=>{
+  const sel=document.querySelector('input[name="feedMode"]:checked');
+  FeedConfig.mode = sel ? sel.value : 'auto';
+  FeedConfig.relayUrl = ($('relayUrlInput').value||'ws://localhost:8787/feed').trim();
+  FeedConfig.save();
+  $('settingsModal').classList.add('hidden');
+  dbg('info','FEED CONFIG SAVED — mode='+FeedConfig.mode+' relay='+redactUrl(FeedConfig.relayUrl));
+  state.plan=null; (Stores[state.asset]||(Stores[state.asset]={})).plan=null;
+  renderSignalPending('analyzing');
+  if(Feed.ws){ try{ Feed.ws.onclose=null; Feed.ws.close(); }catch(e){} Feed.ws=null; }
+  RestPoller.stop();
+  if(establishTimer){ clearTimeout(establishTimer); establishTimer=null; }
+  Feed.attempts=0; Feed.setState('CONNECTING');
+  establishFeed();
+  toast('DIAGNOSTICS RE-RUN INITIATED','info');
+});
+
+/* boot */
+dbg('info','QWEN WATCHER v3.2 boot — network-path diagnostics build (no simulation layer exists in this codebase)');
+Env.detect();
+$('dbgMode').textContent='MODE: '+FeedConfig.mode.toUpperCase();
+buildSelector();
+buildTFButtons();
+renderWatchlist();
+renderWatchStatus();
+feedPillUI();
+Debug.toggle(true);
+const startAsset = initialAsset();
+state.asset = startAsset;
+updateLabels();
+highlightActive();
+beginAssetLoading();
+renderSignalPending('analyzing');
+TVChart.render(startAsset, state.tfId);
+restBootstrap(startAsset, tfCurrent());
+establishFeed();
+setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.state!=='OFFLINE') return; restRefreshInactive(); }, 30000);
+</script>
 <script>
 ‎/* QWEN WATCHER Telegram Publisher Module */
 ‎(function () {
@@ -604,71 +2262,6 @@ tailwind.config = {
   }, 2000);
 })();
 </script>
-
-<script>
-/* QWEN ledger UI v2 - polls canonical /api/performance; self-diagnosing; no silent death. */
-(function () {
-  window.QWEN_LEDGER_UI = true;
-  function esc(s) { return String(s == null ? '' : s); }
-  function hhmm(ms) { try { return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); } catch (e) { return '--:--'; } }
-  function dur(ms) { var m = Math.round((ms || 0) / 60000); return m < 60 ? m + 'm' : Math.floor(m / 60) + 'h' + (m % 60 ? (m % 60) + 'm' : ''); }
-  function pnlCell(v, open) { if (v == null || isNaN(v)) return '<span class="text-mut">—</span>'; var c = v > 0 ? 'text-bull' : v < 0 ? 'text-bear' : 'text-mut'; return '<span class="' + c + (open ? ' pulse' : '') + '">' + (v > 0 ? '+' : '') + v.toFixed(2) + '%</span>'; }
-  function rows(snap) {
-    var r = '';
-    (snap.open || []).forEach(function (o) {
-      r += '<tr class="border-b" style="border-color:var(--edge)"><td class="px-4 sm:px-5 py-2.5 text-slate-400">' + hhmm(o.openedAt) + '</td>' +
-        '<td class="py-2.5"><span class="text-[10px] font-semibold tracking-wider px-2 py-[3px] rounded-md border border-sky-500/30 bg-sky-500/10 text-sky-300">OPEN ' + esc(o.direction) + '</span></td>' +
-        '<td class="py-2.5 text-slate-200">' + esc(o.asset) + '/USD <span class="text-mut">' + esc(o.timeframe) + '</span></td>' +
-        '<td class="py-2.5 text-slate-300">' + esc(o.confidence) + '%</td>' +
-        '<td class="py-2.5 pr-4 sm:pr-5 text-right">' + pnlCell(o.livePnl, true) + '</td></tr>';
-    });
-    (snap.closed || []).forEach(function (c) {
-      var col = c.direction === 'BUY' ? 'border-bull/25 bg-bull/10 text-bull' : 'border-bear/25 bg-bear/10 text-bear';
-      r += '<tr class="border-b" style="border-color:var(--edge)"><td class="px-4 sm:px-5 py-2.5 text-slate-400">' + hhmm(c.openedAt) + '</td>' +
-        '<td class="py-2.5"><span class="text-[10px] font-semibold tracking-wider px-2 py-[3px] rounded-md border ' + col + '">' + esc(c.direction) + '</span></td>' +
-        '<td class="py-2.5 text-slate-200">' + esc(c.asset) + '/USD <span class="text-mut">' + esc(c.timeframe) + '</span><br><span class="text-[9px] text-mut">' + esc(c.entryPrice) + ' → ' + esc(c.exitPrice) + ' · ' + dur(c.durationMs) + '</span></td>' +
-        '<td class="py-2.5 text-slate-300">' + esc(c.confidence) + '%</td>' +
-        '<td class="py-2.5 pr-4 sm:pr-5 text-right">' + pnlCell(c.pnlPct, false) + '<br><span class="text-[9px] text-mut">' + esc(c.closeReason) + '</span></td></tr>';
-    });
-    return r || '<tr><td colspan="5" class="px-5 py-8 text-center text-mut text-[11px] tracking-widest">NO SIGNALS RECORDED YET</td></tr>';
-  }
-  function panel(snap) {
-    var s = snap.summary || {};
-    var g = '<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">' +
-      ['TOTAL ' + (s.total || 0), 'OPEN ' + (s.open || 0), 'CLOSED ' + (s.closed || 0), 'WIN RATE ' + (s.winRate || 0) + '%',
-       'W ' + (s.wins || 0) + ' / L ' + (s.losses || 0) + ' / BE ' + (s.breakevens || 0), 'AVG P&L ' + (s.averagePnl || 0) + '%',
-       'TOTAL P&L ' + (s.totalPnl || 0) + '%', 'PF ' + (s.profitFactor == null ? '∞' : s.profitFactor)]
-      .map(function (x) { return '<div class="border border-white/[0.07] rounded-lg px-2 py-1.5 bg-white/[0.02]">' + x + '</div>'; }).join('') + '</div>';
-    var bd = '';
-    ['confidence', 'asset', 'direction'].forEach(function (k) {
-      var m = (snap.breakdowns || {})[k]; if (!m) return;
-      bd += '<div class="mt-2"><span class="text-[8.5px] font-mono tracking-widest text-mut">BY ' + k.toUpperCase() + '</span><div class="flex flex-wrap gap-1.5 mt-1">' +
-        Object.keys(m).map(function (key) { return '<span class="text-[9px] font-mono border border-white/10 rounded px-1.5 py-[2px]">' + esc(key) + ': n' + m[key].n + ' wr' + m[key].winRate + '% avg' + m[key].avgPnl + '%</span>'; }).join('') + '</div></div>';
-    });
-    return g + bd + '<div class="text-[8.5px] font-mono text-mut/70 mt-2">HYPOTHETICAL SIGNAL P&L % — NOT PORTFOLIO RETURN · persisted: ' + (snap.persisted ? 'yes' : 'session-only') + '</div>';
-  }
-  function mount() {
-    var host = document.getElementById('histBody');
-    if (host && !document.getElementById('perfPanel')) host.insertAdjacentHTML('afterend', '<div id="perfPanel" class="px-4 sm:px-5 py-3.5 border-t" style="border-color:var(--edge)"></div>');
-    try { if (typeof window.renderHistory === 'function') window.renderHistory = function () {}; } catch (e) {}
-    try { if (typeof window.backfillHistory === 'function') window.backfillHistory = function () {}; } catch (e) {}
-  }
-  function render(snap) {
-    var tb = document.getElementById('histRows'); if (tb) tb.innerHTML = rows(snap);
-    var pp = document.getElementById('perfPanel'); if (pp) pp.innerHTML = '<span class="ptitle">PERFORMANCE GRADER</span><div class="mt-2">' + panel(snap) + '</div>';
-  }
-  function fail(msg) {
-    var pp = document.getElementById('perfPanel');
-    if (pp) pp.innerHTML = '<span class="ptitle">PERFORMANCE GRADER</span><div class="mt-2 text-[10px] font-mono text-bear">PERFORMANCE FEED ERROR: ' + esc(msg) + ' — /api/performance unreachable or ledger not wired in backend.</div>';
-  }
-  function loop() {
-    var base = window.QWEN_PERF_HOST || '';
-    fetch(base + '/api/performance', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(render).catch(function (e) { fail(e.message); });
-  }
-  try { mount(); loop(); setInterval(loop, 5000); }
-  catch (e) { var tb = document.getElementById('histRows'); if (tb) tb.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-bear text-[11px]">LEDGER UI MOUNT ERROR: ' + esc(e.message) + '</td></tr>'; }
-})();
-</script>
 </body>
 </html>
 
@@ -676,7 +2269,7 @@ tailwind.config = {
 <script>
 (function connectPublisher() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const pubWs = new WebSocket(getWsUrl());
+  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
   pubWs.onopen = () => {
     console.log('[PUBLISHER] Connected to backend');
@@ -699,7 +2292,7 @@ tailwind.config = {
 <script>
 (function connectPublisher() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const pubWs = new WebSocket(getWsUrl());
+  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
   pubWs.onopen = () => {
     console.log('[PUBLISHER] Connected to backend');
