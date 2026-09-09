@@ -5,6 +5,8 @@
  * No simulated market data.
  */
 
+const MIN_SIGNAL_LIFETIME_MS = 5 * 60 * 1000;
+
 const TF_EXPIRY_MS = {
   '1m': 10 * 60 * 1000,
   '5m': 30 * 60 * 1000,
@@ -286,6 +288,35 @@ function onState(frame) {
      * Direction stayed the same:
      *   REPLACED
      */
+    const ageMs = Math.max(0, now - existing.openedTs);
+
+    /*
+     * Do not close/reopen an active signal merely because a
+     * different signal identity arrives during the first five
+     * minutes.
+     *
+     * STOP_HIT, TARGET_HIT and timeframe expiry are handled
+     * separately and are still allowed to close immediately.
+     */
+    if (ageMs < MIN_SIGNAL_LIFETIME_MS) {
+      existing.lastStateTs = now;
+      existing.lastPrice = Number(frame.price);
+
+      if (frame.confidence != null) {
+        const confidence = Number(frame.confidence);
+
+        if (Number.isFinite(confidence)) {
+          existing.confidence = confidence;
+        }
+      }
+
+      if (frame.regime) {
+        existing.regime = String(frame.regime);
+      }
+
+      return;
+    }
+
     const closeReason =
       existing.direction !== direction
         ? 'REVERSED'
