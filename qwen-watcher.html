@@ -2085,34 +2085,8 @@ restBootstrap(startAsset, tfCurrent());
 establishFeed();
 setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.state!=='OFFLINE') return; restRefreshInactive(); }, 30000);
 </script>
-<script>
-‎/* QWEN WATCHER Telegram Publisher Module */
-‎(function () {
-‎  var lastSig = {};
-‎  function fresh(d, ms) { return d && d.lastUpdate && (Date.now() - d.lastUpdate < ms); }
-‎  function snap(k) {
-‎    var d = window.marketData && window.marketData[k];
-‎    if (!d || d.price == null) return null;
-‎    var q = fresh(d, 30000) ? 'ok' : 'ok-partial';
-‎    return {
-‎      type: 'qwen-state', v: 1, asset: k, price: d.price,
-‎      signal: d.signal || 'WAIT', confidence: d.confidence || 0,
-‎      regime: d.regime || 'NEUTRAL', entry: d.entry || null,
-‎      stop: d.stop || null, target: d.target || null,
-‎      dataQuality: q, ts: Date.now()
-‎    };
-‎  }
-‎  function pub() {
-‎    if (!window.Feed || !window.Feed.ws || window.Feed.ws.readyState !== 1) return;
-‎    ['BTC','ETH','SOL'].forEach(function(k) {
-‎      var s = snap(k);
-‎      if (s) window.Feed.ws.send(JSON.stringify(s));
-‎    });
-‎  }
-‎  setInterval(pub, 3000);
-‎})();
-‎</script>
-<script>(function(){function fresh(d,ms){return d&&d.lastUpdate&&(Date.now()-d.lastUpdate<ms);}function snap(k){var d=window.marketData&&window.marketData[k];if(!d||d.price==null)return null;var q=fresh(d,30000)?"ok":"ok-partial";return{type:"qwen-state",v:1,asset:k,price:d.price,signal:d.signal||"WAIT",confidence:d.confidence||0,regime:d.regime||"NEUTRAL",entry:d.entry||null,stop:d.stop||null,target:d.target||null,dataQuality:q,ts:Date.now()};}function pub(){if(!window.Feed||!window.Feed.ws||window.Feed.ws.readyState!==1)return;["BTC","ETH","SOL"].forEach(function(k){var s=snap(k);if(s)window.Feed.ws.send(JSON.stringify(s));});}setInterval(pub,3000);})();</script>
+
+
 <script>
 /* QWEN WATCHER Telegram publisher (tail module v1.1, self-logging).
    Reads existing canonical frontend state ONLY; validates before publishing;
