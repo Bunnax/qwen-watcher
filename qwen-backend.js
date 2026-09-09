@@ -200,6 +200,9 @@ function connectUpstream() {
                 price,
                 Number.isFinite(tradeTs) ? tradeTs : Date.now()
               );
+              if (typeof PERF.broadcastSnapshot === 'function') {
+                PERF.broadcastSnapshot();
+              }
             }
           }
         }
@@ -232,6 +235,13 @@ wss.on('connection', function (ws) {
     upstreamState: upstreamState
   }));
 
+  if (PERF && typeof PERF.snapshotJSON === 'function') {
+    ws.send(JSON.stringify({
+      type: 'qwen-perf',
+      ...PERF.snapshotJSON()
+    }));
+  }
+
   ws.on('message', function (raw) {
     let msg;
 
@@ -252,6 +262,9 @@ wss.on('connection', function (ws) {
     ) {
       try {
         PERF.onState(msg);
+        if (typeof PERF.broadcastSnapshot === 'function') {
+          PERF.broadcastSnapshot();
+        }
       } catch (e) {
         log('PERF.onState error: ' + e.message);
       }

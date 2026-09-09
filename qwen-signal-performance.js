@@ -221,6 +221,11 @@ function onState(frame) {
   const key = `${asset}|${timeframe}`;
   const now = Number(frame.ts) || getNow();
 
+  latestPrices.set(asset, {
+    price: Number(frame.price),
+    ts: now
+  });
+
   /*
    * The publisher supplies a stable signalId.
    * Identical signalId = same active signal.
@@ -681,6 +686,13 @@ function snapshotJSON() {
   };
 }
 
+function broadcastSnapshot() {
+  broadcaster({
+    type: 'qwen-perf',
+    ...snapshotJSON()
+  });
+}
+
 function closedText(rec) {
   const sign = rec.pnlPct > 0 ? '+' : '';
 
@@ -701,6 +713,7 @@ module.exports = {
 
   summary: summary,
   snapshotJSON: snapshotJSON,
+  broadcastSnapshot: broadcastSnapshot,
   closedText: closedText,
 
   _open: openSignals,

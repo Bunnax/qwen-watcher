@@ -2185,6 +2185,15 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
 (function () {
   window.QWEN_LEDGER_UI = true;
   var perf = null, attached = null;
+
+  function loadInitial() {
+    fetch('/api/performance', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (d) { perf = d; render(); }
+      })
+      .catch(function () {});
+  }
   function hhmm(ms) { return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); }
   function dur(ms) { var m = Math.round(ms / 60000); return m < 60 ? m + 'm' : Math.floor(m / 60) + 'h' + (m % 60 ? (m % 60) + 'm' : ''); }
   function pnlCell(v, open) { if (v == null) return '<span class="text-mut">—</span>'; var c = v > 0 ? 'text-bull' : v < 0 ? 'text-bear' : 'text-mut'; return '<span class="' + c + (open ? ' pulse' : '') + '">' + (v > 0 ? '+' : '') + v.toFixed(2) + '%</span>'; }
@@ -2227,13 +2236,19 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
   }
   var host = document.getElementById('histBody') || document.querySelector('[id*="hist"]') || document.body;
   if (host && !document.getElementById('perfPanel')) host.insertAdjacentHTML('afterend', '<div id="perfPanel" class="px-4 sm:px-5 py-3.5 border-t" style="border-color:var(--edge)"></div>');
+  loadInitial();
+
   setInterval(function () {
     if (typeof Feed === 'undefined' || !Feed.ws || Feed.ws === attached) return;
     attached = Feed.ws;
     attached.addEventListener('message', function (ev) {
       try { var m = JSON.parse(ev.data); if (m && m.type === 'qwen-perf') { perf = m; render(); } } catch (e) {}
     });
-  }, 2000);
+  }, 500);
+
+  setInterval(function () {
+    if (!attached) loadInitial();
+  }, 10000);
 })();
 </script>
 </body>
