@@ -468,9 +468,9 @@ const TYP_ATR_PCT = { '1m':0.10, '5m':0.22, '15m':0.35, '1H':0.70, '4H':1.40, '1
 const C = { bull:'#0ecb81', bear:'#f6465d', warn:'#f0b90b' };
 
 const marketData = {
-  BTC:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null },
-  ETH:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null },
-  SOL:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null },
+  BTC:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null, analysis:null },
+  ETH:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null, analysis:null },
+  SOL:{ price:null, timestamp:null, change24h:null, connected:false, source:null, candles:[], candleStamp:0, candleTf:null, lastUpdate:null, watchSig:null, analysis:null },
 };
 
 const $ = id => document.getElementById(id);
@@ -925,6 +925,7 @@ async function restRefreshInactive(){
     const arr=await loadCandles(key, tf);
     if(arr && arr.length){
       const a=analyze(arr, tf.id, ASSETS[key].base);
+      marketData[key].analysis = a || null;
       marketData[key].watchSig = a ? { signal:a.signal, conf:a.confidence } : null;
     }
     renderWatchlist();
@@ -1889,6 +1890,7 @@ function runAnalysis(full){
   if(d.candles.length<60){ renderSignalPending('insufficient'); return; }
   if(isStale() && !full){ $('staleBadge').classList.remove('hidden'); return; }
   const a = analyze(d.candles, state.tfId, ASSETS[state.asset].base);
+  marketData[state.asset].analysis = a || null;
   if(!a){ renderSignalPending('insufficient'); return; }
   state.analysis=a;
   Stores[state.asset].analysis=a;
@@ -2084,79 +2086,121 @@ establishFeed();
 setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.state!=='OFFLINE') return; restRefreshInactive(); }, 30000);
 </script>
 <script>
-‎/* QWEN WATCHER Telegram Publisher Module */
-‎(function () {
-‎  var lastSig = {};
-‎  function fresh(d, ms) { return d && d.lastUpdate && (Date.now() - d.lastUpdate < ms); }
-‎  function snap(k) {
-‎    var d = window.marketData && window.marketData[k];
-‎    if (!d || d.price == null) return null;
-‎    var q = fresh(d, 30000) ? 'ok' : 'ok-partial';
-‎    return {
-‎      type: 'qwen-state', v: 1, asset: k, price: d.price,
-‎      signal: d.signal || 'WAIT', confidence: d.confidence || 0,
-‎      regime: d.regime || 'NEUTRAL', entry: d.entry || null,
-‎      stop: d.stop || null, target: d.target || null,
-‎      dataQuality: q, ts: Date.now()
-‎    };
-‎  }
-‎  function pub() {
-‎    if (!window.Feed || !window.Feed.ws || window.Feed.ws.readyState !== 1) return;
-‎    ['BTC','ETH','SOL'].forEach(function(k) {
-‎      var s = snap(k);
-‎      if (s) window.Feed.ws.send(JSON.stringify(s));
-‎    });
-‎  }
-‎  setInterval(pub, 3000);
-‎})();
-‎</script>
-<script>(function(){function fresh(d,ms){return d&&d.lastUpdate&&(Date.now()-d.lastUpdate<ms);}function snap(k){var d=window.marketData&&window.marketData[k];if(!d||d.price==null)return null;var q=fresh(d,30000)?"ok":"ok-partial";return{type:"qwen-state",v:1,asset:k,price:d.price,signal:d.signal||"WAIT",confidence:d.confidence||0,regime:d.regime||"NEUTRAL",entry:d.entry||null,stop:d.stop||null,target:d.target||null,dataQuality:q,ts:Date.now()};}function pub(){if(!window.Feed||!window.Feed.ws||window.Feed.ws.readyState!==1)return;["BTC","ETH","SOL"].forEach(function(k){var s=snap(k);if(s)window.Feed.ws.send(JSON.stringify(s));});}setInterval(pub,3000);})();</script>
+‎/* QWEN WATCHER — Canonical Signal Publisher */
+(function () {
+  'use strict';
+
+  function fresh(d, ms) {
+    return !!(d && d.lastUpdate && (Date.now() - d.lastUpdate < ms));
+  }
+
+  function currentTimeframe() {
+    return (window.state && window.state.tfId) || '15m';
+  }
+
+  function snap(k) {
+    const d = marketData[k];
+    if (!d || d.price == null || !isFinite(d.price)) return null;
+
+    const a = d.analysis;
+    const tf = currentTimeframe();
+
+    if (!a) {
+      return {
+        type: 'qwen-state',
+        v: 1,
+        publisher: 'dashboard',
+        asset: k,
+        tf: tf,
+        price: d.price,
+        signal: 'WAIT',
+        confidence: 0,
+        regime: 'NEUTRAL',
+        entryLow: null,
+        entryHigh: null,
+        stop: null,
+        target: null,
+        dataQuality: fresh(d, 30000) ? 'ok-partial' : 'stale',
+        ts: Date.now()
+      };
+    }
+
+    const signal = a.signal || 'WAIT';
+
+    /*
+     * A stable signal ID is essential.
+     * The publisher runs repeatedly, so frame.ts must NOT be used
+     * as the identity of a signal.
+     *
+     * planGenAt identifies the current analysis generation while
+     * the timeframe and asset identify its scope.
+     */
+    const generation =
+      (window.state && window.state.planGenAt) ||
+      d.candleStamp ||
+      d.lastUpdate ||
+      0;
+
+    const signalId =
+      k + '|' + tf + '|' + generation + '|' + signal;
+
+    return {
+      type: 'qwen-state',
+      v: 1,
+      publisher: 'dashboard',
+      asset: k,
+      tf: tf,
+      price: d.price,
+
+      signal: signal,
+      confidence: Number(a.confidence) || 0,
+      regime: a.regime || 'NEUTRAL',
+
+      entryLow: a.entryLow == null ? null : Number(a.entryLow),
+      entryHigh: a.entryHigh == null ? null : Number(a.entryHigh),
+      stop: a.stop == null ? null : Number(a.stop),
+      target: a.target == null ? null : Number(a.target),
+
+      signalId: signalId,
+
+      dataQuality: fresh(d, 30000) ? 'ok' : 'ok-partial',
+      ts: Date.now()
+    };
+  }
+
+  function publish() {
+    if (!window.Feed ||
+        !window.Feed.ws ||
+        window.Feed.ws.readyState !== 1) {
+      return;
+    }
+
+    ['BTC', 'ETH', 'SOL'].forEach(function (k) {
+      try {
+        const frame = snap(k);
+        if (frame) {
+          window.Feed.ws.send(JSON.stringify(frame));
+        }
+      } catch (e) {
+        if (typeof dbg === 'function') {
+          dbg('error', 'Signal publisher failed for ' + k + ' — ' + e.message);
+        }
+      }
+    });
+  }
+
+  /*
+   * Publish frequently enough for PERF to receive fresh state,
+   * while avoiding unnecessary message volume.
+   */
+  setInterval(publish, 3000);
+
+  /*
+   * Publish once shortly after initialization so PERF does not
+   * have to wait for the first interval.
+   */
+  setTimeout(publish, 1000);
+})();
+</script>
 </body>
 </html>
-
-
-<script>
-(function connectPublisher() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-  pubWs.onopen = () => {
-    console.log('[PUBLISHER] Connected to backend');
-    setInterval(() => {
-      if (pubWs.readyState === WebSocket.OPEN && window.latestState) {
-        pubWs.send(JSON.stringify({
-          type: 'publisher_state',
-          data: window.latestState
-        }));
-      }
-    }, 3000);
-  };
-
-  pubWs.onclose = () => {
-    setTimeout(connectPublisher, 3000);
-  };
-})();
-</script>
-
-<script>
-(function connectPublisher() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const pubWs = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-  pubWs.onopen = () => {
-    console.log('[PUBLISHER] Connected to backend');
-    setInterval(() => {
-      if (pubWs.readyState === WebSocket.OPEN && window.latestState) {
-        pubWs.send(JSON.stringify({
-          type: 'publisher_state',
-          data: window.latestState
-        }));
-      }
-    }, 3000);
-  };
-
-  pubWs.onclose = () => {
-    setTimeout(connectPublisher, 3000);
-  };
-})();
-</script>
