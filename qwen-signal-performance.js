@@ -229,6 +229,15 @@ function onState(frame) {
   });
 
   /*
+   * Only explicitly active engine-generated signals may
+   * open, replace, reverse, or otherwise affect PnL state.
+   * Passive analysis/watch frames may still update prices.
+   */
+  if (frame.signalActive !== true) {
+    return;
+  }
+
+  /*
    * The publisher supplies a stable signalId.
    * Identical signalId = same active signal.
    * Different signalId = new signal/window.

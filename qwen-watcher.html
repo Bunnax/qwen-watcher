@@ -915,7 +915,7 @@ async function restBootstrap(activeKey, tf){
   await Promise.all(ASSET_KEYS.map(k=>fetchInitialStats(k)));
   renderSelector(); renderWatchlist(); renderWatchStatus(); updatePriceUI(); feedPillUI();
   await loadCandles(activeKey, tf);
-  if(marketData[activeKey].candles.length){ backfillHistory(); runAnalysis(true); }
+  if(marketData[activeKey].candles.length){ backfillHistory(); runAnalysis(true,{allowSignalGeneration:false,reason:"ASSET_SWITCH"}); }
   else renderSignalPending('insufficient');
 }
 async function restRefreshInactive(){
@@ -955,7 +955,7 @@ const RestPoller = {
     renderSelector(); renderWatchlist(); renderWatchStatus(); updatePriceUI(); feedPillUI();
     if(this.cycle%3===1){
       const arr=await loadCandles(state.asset, tfCurrent());
-      if(arr && arr.length){ if(!Stores[state.asset].backfilled){ backfillHistory(); } runAnalysis(false); }
+      if(arr && arr.length){ if(!Stores[state.asset].backfilled){ backfillHistory(); } runAnalysis(false,{allowSignalGeneration:true,reason:'REST_MARKET_UPDATE'}); }
       restRefreshInactive();
     }
   }
@@ -1429,7 +1429,8 @@ const TVChart = {
 
 /* ── state + UI ── */
 const Stores = { BTC:{}, ETH:{}, SOL:{} };
-const state = { asset:'BTC', tfId:'15m', analysis:null, plan:null, history:[], shownPrice:null, planGenAt:0, lastRegenCooldown:0, curSig:null };
+function viewStore(asset,tf){const a=Stores[asset]||(Stores[asset]={});const t=tf||state.tfId;return a[t]||(a[t]={history:[],backfilled:false,plan:null,analysis:null,signalArmed:true,tf:t});}
+const state = { asset:'BTC', tfId:'15m', analysis:null, plan:null, history:[], shownPrice:null, planGenAt:0, lastRegenCooldown:0, curSig:null, signalArmed:true };
 const indVis = { ema20:true, ema50:true, ema200:true, vwap:true, bb:false, rsi:false, macd:false };
 let throttles = { analysis:0, watchBridge:0, priceUI:0 };
 
@@ -1717,12 +1718,15 @@ function planTexts(dir, a){
     condition: base+' has not yet confirmed a breakout — momentum is '+a.momentum.toLowerCase()+' and confirmation is insufficient.',
     action:'Do not enter. Wait for confirmation of direction with volume.' };
 }
-function generatePlan(a){
+function isOptimumSignal(a){return !!a&&(a.signal=="BUY"||a.signal=="SELL")&&Number(a.confidence)>=62;}
+function generatePlan(a,reason){if(!isOptimumSignal(a))return null;if(state.signalArmed===false)return null;
   const winSec = WINDOW_MIN[state.tfId]*60;
   const nowS = Date.now()/1000;
   const start = Math.floor(nowS/winSec)*winSec;
   const seq = a.signal==='BUY' ? ['BUY','WAIT','SELL','WAIT'] : a.signal==='SELL' ? ['SELL','WAIT','BUY','WAIT'] : ['WAIT','BUY','WAIT','SELL'];
   const offsets=[0,-7,4,-4];
+  const signalId=state.asset+"|"+state.tfId+"|"+Date.now()+"|"+a.signal;
+  state.signalArmed=false;
   state.plan = {
     winSec, primaryDir:a.signal, stop:a.stop,
     windows: seq.map((dir,k)=>{
@@ -1733,7 +1737,11 @@ function generatePlan(a){
         status: k===0?'ACTIVE':'UPCOMING', min:null, max:null, invalidated:false, entryPrice:k===0?a.px:null };
     })
   };
-  state.planGenAt = Date.now();
+  state.plan.signalId=signalId;
+  state.plan.generationReason=reason||"MARKET_CONDITION";
+  state.signalArmed=false;
+  const store=viewStore(state.asset,state.tfId); store.plan=state.plan; store.analysis=a; store.signalArmed=false;
+  state.planGenAt=Date.now();
   renderPlan();
 }
 function renderPlan(){
@@ -1859,7 +1867,7 @@ async function ensureCandles(key, tf){
   if(key!==state.asset) return true;
   if(arr && arr.length){
     if(!Stores[key].backfilled || Stores[key].tf!==state.tfId){ backfillHistory(); }
-    runAnalysis(true);
+    runAnalysis(true,{allowSignalGeneration:false,reason:'VIEW_CHANGE'});
   } else renderSignalPending('insufficient');
   return true;
 }
@@ -1879,9 +1887,11 @@ function switchAsset(key, opts){
   updateLabels();
   beginAssetLoading();
   highlightActive();
-  const st=Stores[key]||(Stores[key]={});
-  if(st.tf && st.tf!==state.tfId){ st.history=[]; st.backfilled=false; st.plan=null; st.analysis=null; }
-  state.plan=st.plan||null; state.history=st.history||[];
+  const st=viewStore(key,state.tfId);
+  state.plan=st.plan||null;
+  state.history=st.history||[];
+  state.analysis=st.analysis||null;
+  state.signalArmed=st.signalArmed!==false;
   if(state.plan) renderPlan();
   else $('planBody').innerHTML='<div class="shimmer h-24 rounded-xl">&nbsp;</div><div class="shimmer h-24 rounded-xl">&nbsp;</div>';
   renderHistory();
@@ -1890,7 +1900,7 @@ function switchAsset(key, opts){
   Feed.switchTrades(key);
   const d=marketData[key];
   if(d.candles.length && d.candleTf===state.tfId && Date.now()-d.candleStamp<120000){
-    updatePriceUI(); runAnalysis(true);
+    updatePriceUI(); runAnalysis(true,{allowSignalGeneration:false,reason:"ASSET_SWITCH"});
   } else {
     ensureCandles(key, tfCurrent());
   }
@@ -1899,7 +1909,7 @@ function switchAsset(key, opts){
   if(!opts.initial) toast('SWITCHED TO '+ASSETS[key].pair, 'info');
 }
 
-function runAnalysis(full){
+function runAnalysis(full,opts){opts=opts||{};const allowGeneration=opts.allowSignalGeneration!==false;
   const d=marketData[state.asset];
   if(!d.candles.length){ renderSignalPending('analyzing'); return; }
   if(d.candles.length<60){ renderSignalPending('insufficient'); return; }
@@ -1911,8 +1921,9 @@ function runAnalysis(full){
   $('staleBadge').classList.toggle('hidden', !isStale());
   renderSignal(a); renderRegime(a); renderMatrix(a); renderReasoning(a); renderLevels(a);
   renderWatchlist();
-  if(full || !state.plan) generatePlan(a);
-  else {
+  if(a.signal==='WAIT'){ state.signalArmed=true; Stores[state.asset].signalArmed=true; if(state.plan){state.plan=null;Stores[state.asset].plan=null;} return a; }
+  if(!state.plan && allowGeneration && state.signalArmed && isOptimumSignal(a)) generatePlan(a,opts.reason||'MARKET_CONDITION');
+  else if(state.plan) {
     const p=state.plan, w=p.windows[0];
     const now=Date.now();
     const flipped = (p.primaryDir==='BUY'&&a.signal==='SELL') || (p.primaryDir==='SELL'&&a.signal==='BUY');
@@ -1920,13 +1931,12 @@ function runAnalysis(full){
       w.status='INVALIDATED';
       pushHistory({ time:w.start, signal:w.dir, price:state.shownPrice||a.px, confidence:w.confidence, result:'Invalidated' });
       state.lastRegenCooldown=now;
-      generatePlan(a);
-      toast(ASSETS[state.asset].base+' SIGNAL FLIP — PLAN REGENERATED ('+a.signal+')', a.signal==='BUY'?'bull':'bear');
+      toast(ASSETS[state.asset].base+' SIGNAL INVALIDATED — WAITING FOR NEXT OPTIMUM SETUP','warn');
     }
   }
 }
 function refreshAnalysis(manual){
-  runAnalysis(true);
+  runAnalysis(true,{allowSignalGeneration:false,reason:'MANUAL_VIEW_REFRESH'});
   if(state.analysis && state.plan){
     state.lastRegenCooldown=Date.now();
     if(manual) toast('ANALYSIS REFRESHED — '+state.analysis.signal+' '+state.analysis.confidence+'%', state.analysis.signal==='BUY'?'bull':state.analysis.signal==='SELL'?'bear':'warn');
@@ -1980,7 +1990,7 @@ Bus.on('candles', key=>{
     }
   }
 });
-Bus.on('candleClose', key=>{ if(key===state.asset) runAnalysis(true); });
+Bus.on('candleClose', key=>{ if(key===state.asset) runAnalysis(true,{allowSignalGeneration:true,reason:'CANDLE_CLOSE'}); });
 Bus.on('feedState', ()=>{ feedPillUI(); renderWatchStatus(); renderSelector(); });
 
 setInterval(()=>{
@@ -1999,8 +2009,8 @@ setInterval(()=>{
     const nowS=Date.now()/1000, w=p.windows[0];
     if(nowS>=w.end){
       evaluateWindow(w);
-      runAnalysis(true);
-      toast(ASSETS[state.asset].pair+' SIGNAL WINDOW EXPIRED — RE-ANALYZED', 'info');
+      runAnalysis(true,{allowSignalGeneration:false,reason:'WINDOW_EXPIRED'});
+      toast(ASSETS[state.asset].pair+' SIGNAL WINDOW EXPIRED — WAITING FOR NEXT OPTIMUM SETUP', 'info');
     } else if(w.status==='ACTIVE' && w.invalidated && nowS-state.planGenAt>5){
       w.status='INVALIDATED';
       evaluateWindow(w);
@@ -2010,7 +2020,7 @@ setInterval(()=>{
       // The next plan is created when this window expires, or when the
       // high-confidence signal-flip logic in runAnalysis() detects a genuine
       // direction change.
-      runAnalysis(false);
+      runAnalysis(false,{allowSignalGeneration:false,reason:'WINDOW_INVALIDATED'});
       toast('WINDOW INVALIDATED — PRICE CROSSED STOP', 'bear');
     }
   }
@@ -2020,13 +2030,11 @@ function buildTFButtons(){
   $('tfBtns').innerHTML = TIMEFRAMES.map(t=>'<button data-tf="'+t.id+'" class="tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(t.id===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300')+'">'+t.label+'</button>').join('');
   document.querySelectorAll('.tfbtn').forEach(b=>b.addEventListener('click', ()=>{
     if(b.dataset.tf===state.tfId) return;
+    const oldView=viewStore(state.asset,state.tfId); oldView.plan=state.plan; oldView.history=state.history; oldView.analysis=state.analysis; oldView.signalArmed=state.signalArmed;
     state.tfId=b.dataset.tf;
     document.querySelectorAll('.tfbtn').forEach(x=>x.className='tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(x.dataset.tf===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300'));
-    ASSET_KEYS.forEach(k=>{
-      const s=Stores[k]||(Stores[k]={}); s.history=[]; s.backfilled=false; s.plan=null;
-      marketData[k].candles=[]; marketData[k].candleStamp=0; marketData[k].candleTf=null; marketData[k].watchSig=null;
-    });
-    state.plan=null; state.history=[];
+    const nextView=viewStore(state.asset,state.tfId); state.plan=nextView.plan||null; state.history=nextView.history||[]; state.analysis=nextView.analysis||null; state.signalArmed=nextView.signalArmed!==false;
+    marketData[state.asset].candles=[]; marketData[state.asset].candleStamp=0; marketData[state.asset].candleTf=null; marketData[state.asset].watchSig=null;
     $('planBody').innerHTML='<div class="shimmer h-24 rounded-xl">&nbsp;</div>';
     renderHistory();
     renderSignalPending('analyzing');
@@ -2134,14 +2142,7 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
   var announced = {};
 
   function stableSignalId(asset, tf, signal) {
-    var key = asset + '|' + tf;
-    var previous = lastSig[key];
-
-    if (previous !== signal) {
-      signalGeneration[key] = (signalGeneration[key] || 0) + 1;
-    }
-
-    return asset + '|' + tf + '|' + signal + '|' + (signalGeneration[key] || 1);
+    return asset + '|' + tf + '|' + signal;
   }
   function fresh(d, ms) { return d && d.lastUpdate != null && (Date.now() - d.lastUpdate) < ms; }
   function skip(k, why) {
@@ -2176,10 +2177,11 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
       if (d.candles.length < 60) return null;
       if (Feed.state !== 'ONLINE' && Feed.state !== 'REST') return null;
       if (!fresh(d, 30000)) return null;
-      return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, a.signal), price: d.price, pct: d.change24h == null ? null : d.change24h,
+      return { ts: now, asset: k, tf: state.tfId, price: d.price, pct: d.change24h == null ? null : d.change24h,
         signal: a.signal, confidence: a.confidence, entryLow: a.entryLow, entryHigh: a.entryHigh, stop: a.stop, target: a.target,
         regime: a.regime, strength: a.strength, volLabel: a.volLabel, momentum: a.momentum,
-        signalId: stableSignalId(k, state.tfId, a.signal, state.planGenAt),
+        signalId: (state.plan && state.plan.signalId) || stableSignalId(k, state.tfId, a.signal),
+        signalActive: !!(state.plan && state.plan.windows && state.plan.windows[0] && state.plan.windows[0].status==='ACTIVE' && (a.signal==='BUY'||a.signal==='SELL')),
         planStatus: (state.plan && state.plan.windows && state.plan.windows[0]) ? state.plan.windows[0].status : null,
         dataQuality: 'ok' };
     }
@@ -2187,10 +2189,9 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
     if (!w || !w.signal) return null;
     if (d.candles.length < 60) return null;
     if (!fresh(d, 90000)) return null;
-    return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, w.signal), price: d.price, pct: d.change24h == null ? null : d.change24h,
+    return { ts: now, asset: k, tf: state.tfId, signalId: stableSignalId(k, state.tfId, w.signal), signalActive: false, price: d.price, pct: d.change24h == null ? null : d.change24h,
       signal: w.signal, confidence: w.conf, entryLow: null, entryHigh: null, stop: null, target: null,
       regime: null, strength: null, volLabel: null, momentum: null,
-      signalId: stableSignalId(k, state.tfId, w.signal, 0),
       planStatus: null, dataQuality: 'ok-partial' };
   }
   function publish() {
@@ -2204,10 +2205,11 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
         s.type = 'qwen-state'; s.v = 1; s.publisher = 'dashboard';
         ws.send(JSON.stringify(s));
         if (!announced[k]) { announced[k] = true; try { dbg('ok', 'PUBLISHER live: sending ' + k + ' snapshots every 5s'); } catch (e) {} }
-        if (lastSig[k] && lastSig[k] !== s.signal) {
-          ws.send(JSON.stringify({ type: 'qwen-event', v: 1, ts: Date.now(), asset: k, event: 'signal-flip', from: lastSig[k], to: s.signal, confidence: s.confidence }));
+        var sigKey = k + '|' + state.tfId;
+        if (lastSig[sigKey] && lastSig[sigKey] !== s.signal) {
+          ws.send(JSON.stringify({ type: 'qwen-event', v: 1, ts: Date.now(), asset: k, event: 'signal-flip', from: lastSig[sigKey], to: s.signal, confidence: s.confidence }));
         }
-        lastSig[k] = s.signal;
+        lastSig[sigKey] = s.signal;
       } catch (e) { skip(k, 'send error ' + e.message); }
     }
   }
