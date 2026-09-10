@@ -915,7 +915,7 @@ async function restBootstrap(activeKey, tf){
   await Promise.all(ASSET_KEYS.map(k=>fetchInitialStats(k)));
   renderSelector(); renderWatchlist(); renderWatchStatus(); updatePriceUI(); feedPillUI();
   await loadCandles(activeKey, tf);
-  if(marketData[activeKey].candles.length){ backfillHistory(); runAnalysis(true); }
+  if(marketData[activeKey].candles.length){ backfillHistory(); runAnalysis(true,{allowSignalGeneration:false,reason:"ASSET_SWITCH"}); }
   else renderSignalPending('insufficient');
 }
 async function restRefreshInactive(){
@@ -1430,7 +1430,8 @@ const TVChart = {
 
 /* ── state + UI ── */
 const Stores = { BTC:{}, ETH:{}, SOL:{} };
-const state = { asset:'BTC', tfId:'15m', analysis:null, plan:null, history:[], shownPrice:null, planGenAt:0, lastRegenCooldown:0, curSig:null };
+function viewStore(asset,tf){const a=Stores[asset]||(Stores[asset]={});const t=tf||state.tfId;return a[t]||(a[t]={history:[],backfilled:false,plan:null,analysis:null,signalArmed:false,curSig:null,tf:t});}
+const state = { asset:'BTC', tfId:'15m', analysis:null, plan:null, history:[], shownPrice:null, planGenAt:0, lastRegenCooldown:0, curSig:null, signalArmed:false };
 const indVis = { ema20:true, ema50:true, ema200:true, vwap:true, bb:false, rsi:false, macd:false };
 let throttles = { analysis:0, watchBridge:0, priceUI:0 };
 
@@ -1633,7 +1634,7 @@ function renderSignal(a){
   $('sigEntry').textContent = fmt$0(a.entryLow)+' — '+fmt$0(a.entryHigh);
   $('sigStop').textContent = fmt$0(a.stop);
   $('sigTarget').textContent = fmt$0(a.target);
-  state.curSig = a.signal;
+  // curSig is owned by the market-event setup state machine. Rendering must never mutate setup-transition state.
 }
 function renderSignalPending(mode){
   const card=$('signalCard');
@@ -1718,7 +1719,7 @@ function planTexts(dir, a){
     condition: base+' has not yet confirmed a breakout — momentum is '+a.momentum.toLowerCase()+' and confirmation is insufficient.',
     action:'Do not enter. Wait for confirmation of direction with volume.' };
 }
-function generatePlan(a){
+function isOptimumSignal(a){return !!a&&(a.signal=="BUY"||a.signal=="SELL")&&Number(a.confidence)>=62;}\nfunction generatePlan(a,reason){if(!isOptimumSignal(a))return null;if(state.signalArmed===false)return null;
   const winSec = WINDOW_MIN[state.tfId]*60;
   const nowS = Date.now()/1000;
   const start = Math.floor(nowS/winSec)*winSec;
@@ -1870,7 +1871,7 @@ function switchAsset(key, opts){
     Stores[state.asset].plan=state.plan;
     Stores[state.asset].history=state.history;
     Stores[state.asset].analysis=state.analysis;
-    Stores[state.asset].tf=state.tfId;
+    Stores[state.asset].tf=state.tfId; Stores[state.asset].curSig=state.curSig;
   }
   state.asset=key;
   persistAsset(key);
@@ -1878,9 +1879,11 @@ function switchAsset(key, opts){
   updateLabels();
   beginAssetLoading();
   highlightActive();
-  const st=Stores[key]||(Stores[key]={});
-  if(st.tf && st.tf!==state.tfId){ st.history=[]; st.backfilled=false; st.plan=null; st.analysis=null; }
-  state.plan=st.plan||null; state.history=st.history||[];
+  const st=viewStore(key,state.tfId);
+  state.plan=st.plan||null;
+  state.history=st.history||[];
+  state.analysis=st.analysis||null; state.curSig=st.curSig||null;
+  state.signalArmed=st.signalArmed!==false;
   if(state.plan) renderPlan();
   else $('planBody').innerHTML='<div class="shimmer h-24 rounded-xl">&nbsp;</div><div class="shimmer h-24 rounded-xl">&nbsp;</div>';
   renderHistory();
@@ -1889,7 +1892,7 @@ function switchAsset(key, opts){
   Feed.switchTrades(key);
   const d=marketData[key];
   if(d.candles.length && d.candleTf===state.tfId && Date.now()-d.candleStamp<120000){
-    updatePriceUI(); runAnalysis(true);
+    updatePriceUI(); runAnalysis(true,{allowSignalGeneration:false,reason:"ASSET_SWITCH"});
   } else {
     ensureCandles(key, tfCurrent());
   }
@@ -1898,32 +1901,46 @@ function switchAsset(key, opts){
   if(!opts.initial) toast('SWITCHED TO '+ASSETS[key].pair, 'info');
 }
 
-function runAnalysis(full){
+function runAnalysis(full,opts){
+  opts=opts||{};
   const d=marketData[state.asset];
-  if(!d.candles.length){ renderSignalPending('analyzing'); return; }
-  if(d.candles.length<60){ renderSignalPending('insufficient'); return; }
-  if(isStale() && !full){ $('staleBadge').classList.remove('hidden'); return; }
-  const a = analyze(d.candles, state.tfId, ASSETS[state.asset].base);
-  marketData[state.asset].analysis = a || null;
-  if(!a){ renderSignalPending('insufficient'); return; }
+
+  if(!d.candles.length){
+    renderSignalPending('analyzing');
+    return;
+  }
+
+  if(d.candles.length<60){
+    renderSignalPending('insufficient');
+    return;
+  }
+
+  if(isStale() && !full){
+    $('staleBadge').classList.remove('hidden');
+    return;
+  }
+
+  const a=analyze(d.candles,state.tfId,ASSETS[state.asset].base);
+
+  marketData[state.asset].analysis=a||null;
+
+  if(!a){
+    renderSignalPending('insufficient');
+    return;
+  }
+
   state.analysis=a;
   Stores[state.asset].analysis=a;
-  $('staleBadge').classList.toggle('hidden', !isStale());
-  renderSignal(a); renderRegime(a); renderMatrix(a); renderReasoning(a); renderLevels(a);
+
+  $('staleBadge').classList.toggle('hidden',!isStale());
+  renderSignal(a);
+  renderRegime(a);
+  renderMatrix(a);
+  renderReasoning(a);
+  renderLevels(a);
   renderWatchlist();
-  if(full || !state.plan) generatePlan(a);
-  else {
-    const p=state.plan, w=p.windows[0];
-    const now=Date.now();
-    const flipped = (p.primaryDir==='BUY'&&a.signal==='SELL') || (p.primaryDir==='SELL'&&a.signal==='BUY');
-    if(flipped && a.confidence>=66 && now-state.lastRegenCooldown>45000 && w && w.status==='ACTIVE'){
-      w.status='INVALIDATED';
-      pushHistory({ time:w.start, signal:w.dir, price:state.shownPrice||a.px, confidence:w.confidence, result:'Invalidated' });
-      state.lastRegenCooldown=now;
-      generatePlan(a);
-      toast(ASSETS[state.asset].base+' SIGNAL FLIP — PLAN REGENERATED ('+a.signal+')', a.signal==='BUY'?'bull':'bear');
-    }
-  }
+
+  return a;
 }
 function refreshAnalysis(manual){
   runAnalysis(true);
@@ -1980,7 +1997,34 @@ Bus.on('candles', key=>{
     }
   }
 });
-Bus.on('candleClose', key=>{ if(key===state.asset) runAnalysis(true); });
+Bus.on('candleClose', key=>{
+  if(key!==state.asset) return;
+
+  const a=runAnalysis(true);
+  if(!a) return;
+
+  const previousSig=state.curSig;
+  state.curSig=a.signal;
+  viewStore(state.asset,state.tfId).curSig=state.curSig;
+
+  if(a.signal==='WAIT'){
+    state.signalArmed=true;
+    const store=viewStore(state.asset,state.tfId);
+    store.signalArmed=true;
+    return;
+  }
+
+  const newSetup =
+    previousSig==='WAIT' &&
+    isOptimumSignal(a);
+
+  if(!state.plan && state.signalArmed && newSetup){
+    generatePlan(a,'NEW_SETUP');
+    state.signalArmed=false;
+    const store=viewStore(state.asset,state.tfId);
+    store.signalArmed=false;
+  }
+});
 Bus.on('feedState', ()=>{ feedPillUI(); renderWatchStatus(); renderSelector(); });
 
 setInterval(()=>{
@@ -1999,19 +2043,24 @@ setInterval(()=>{
     const nowS=Date.now()/1000, w=p.windows[0];
     if(nowS>=w.end){
       evaluateWindow(w);
+      state.plan=null;
+      state.signalArmed=false;
+      const store=viewStore(state.asset,state.tfId);
+      store.plan=null;
+      store.signalArmed=false;
       runAnalysis(true);
-      toast(ASSETS[state.asset].pair+' SIGNAL WINDOW EXPIRED — RE-ANALYZED', 'info');
+      toast(ASSETS[state.asset].pair+' SIGNAL WINDOW EXPIRED — WAITING FOR NEW SETUP', 'info');
     } else if(w.status==='ACTIVE' && w.invalidated && nowS-state.planGenAt>5){
       w.status='INVALIDATED';
       evaluateWindow(w);
-      // Do NOT regenerate the plan immediately after invalidation.
-      // If the same signal direction is still active, immediate regeneration
-      // creates a new plan which can hit the same stop and regenerate again.
-      // The next plan is created when this window expires, or when the
-      // high-confidence signal-flip logic in runAnalysis() detects a genuine
-      // direction change.
+      // The setup has been consumed. Do not re-enter the same condition.
+      state.plan=null;
+      state.signalArmed=false;
+      const store=viewStore(state.asset,state.tfId);
+      store.plan=null;
+      store.signalArmed=false;
       runAnalysis(false);
-      toast('WINDOW INVALIDATED — PRICE CROSSED STOP', 'bear');
+      toast('WINDOW INVALIDATED — WAITING FOR NEW SETUP', 'bear');
     }
   }
 }, 1000);
@@ -2020,13 +2069,29 @@ function buildTFButtons(){
   $('tfBtns').innerHTML = TIMEFRAMES.map(t=>'<button data-tf="'+t.id+'" class="tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(t.id===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300')+'">'+t.label+'</button>').join('');
   document.querySelectorAll('.tfbtn').forEach(b=>b.addEventListener('click', ()=>{
     if(b.dataset.tf===state.tfId) return;
+    const oldView=viewStore(state.asset,state.tfId);
+    oldView.plan=state.plan;
+    oldView.history=state.history;
+    oldView.analysis=state.analysis;
+    oldView.signalArmed=state.signalArmed;
+    oldView.curSig=state.curSig;
+
     state.tfId=b.dataset.tf;
+
     document.querySelectorAll('.tfbtn').forEach(x=>x.className='tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(x.dataset.tf===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300'));
-    ASSET_KEYS.forEach(k=>{
-      const s=Stores[k]||(Stores[k]={}); s.history=[]; s.backfilled=false; s.plan=null;
-      marketData[k].candles=[]; marketData[k].candleStamp=0; marketData[k].candleTf=null; marketData[k].watchSig=null;
-    });
-    state.plan=null; state.history=[];
+
+    const nextView=viewStore(state.asset,state.tfId);
+    state.plan=nextView.plan||null;
+    state.history=nextView.history||[];
+    state.analysis=nextView.analysis||null;
+    state.signalArmed=nextView.signalArmed===true;
+    state.curSig=nextView.curSig||null;
+
+    const d=marketData[state.asset];
+    d.candles=[];
+    d.candleStamp=0;
+    d.candleTf=null;
+    d.watchSig=null;
     $('planBody').innerHTML='<div class="shimmer h-24 rounded-xl">&nbsp;</div>';
     renderHistory();
     renderSignalPending('analyzing');
