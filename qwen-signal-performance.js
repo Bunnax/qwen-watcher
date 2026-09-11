@@ -337,6 +337,10 @@ function onState(frame) {
       Number(frame.price),
       now
     );
+
+    // Closing an existing signal must never open a new
+    // signal from the same qwen-state frame.
+    return;
   }
 
   /*
