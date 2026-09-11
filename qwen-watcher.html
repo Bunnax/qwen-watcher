@@ -1429,7 +1429,7 @@ const TVChart = {
 
 /* ── state + UI ── */
 const Stores = { BTC:{}, ETH:{}, SOL:{} };
-function viewStore(asset,tf){const a=Stores[asset]||(Stores[asset]={});const t=tf||state.tfId;return a[t]||(a[t]={history:[],backfilled:false,plan:null,analysis:null,signalArmed:true,tf:t});}
+function viewStore(asset,tf){const a=Stores[asset]||(Stores[asset]={});const t=tf||state.tfId;return a[t]||(a[t]={history:[],backfilled:false,plan:null,analysis:null,signalArmed:false,tf:t});}
 const state = { asset:'BTC', tfId:'15m', analysis:null, plan:null, history:[], shownPrice:null, planGenAt:0, lastRegenCooldown:0, curSig:null, signalArmed:true };
 const indVis = { ema20:true, ema50:true, ema200:true, vwap:true, bb:false, rsi:false, macd:false };
 let throttles = { analysis:0, watchBridge:0, priceUI:0 };
@@ -1739,8 +1739,14 @@ function generatePlan(a,reason){if(!isOptimumSignal(a))return null;if(state.sign
   };
   state.plan.signalId=signalId;
   state.plan.generationReason=reason||"MARKET_CONDITION";
+  state.plan.activationId=signalId;
+  state.plan.pnLAuthorized=true;
   state.signalArmed=false;
-  const store=viewStore(state.asset,state.tfId); store.plan=state.plan; store.analysis=a; store.signalArmed=false;
+  const store=viewStore(state.asset,state.tfId);
+  store.plan=state.plan;
+  store.analysis=a;
+  store.signalArmed=false;
+  store.pnLAuthorized=true;
   state.planGenAt=Date.now();
   renderPlan();
 }
@@ -1882,6 +1888,11 @@ function switchAsset(key, opts){
     Stores[state.asset].tf=state.tfId;
   }
   state.asset=key;
+
+  // Asset changes never authorize a new PnL signal.
+  // Restored plans are display/history state only.
+  state.signalArmed=false;
+
   persistAsset(key);
   state.analysis=null;
   updateLabels();
@@ -1909,31 +1920,43 @@ function switchAsset(key, opts){
   if(!opts.initial) toast('SWITCHED TO '+ASSETS[key].pair, 'info');
 }
 
-function runAnalysis(full,opts){opts=opts||{};const allowGeneration=opts.allowSignalGeneration!==false;
+function runAnalysis(full,opts){
+  opts=opts||{};
   const d=marketData[state.asset];
-  if(!d.candles.length){ renderSignalPending('analyzing'); return; }
-  if(d.candles.length<60){ renderSignalPending('insufficient'); return; }
-  if(isStale() && !full){ $('staleBadge').classList.remove('hidden'); return; }
-  const a = analyze(d.candles, state.tfId, ASSETS[state.asset].base);
-  if(!a){ renderSignalPending('insufficient'); return; }
+
+  if(!d.candles.length){
+    renderSignalPending('analyzing');
+    return;
+  }
+
+  if(d.candles.length<60){
+    renderSignalPending('insufficient');
+    return;
+  }
+
+  if(isStale() && !full){
+    $('staleBadge').classList.remove('hidden');
+    return;
+  }
+
+  const a=analyze(d.candles,state.tfId,ASSETS[state.asset].base);
+  if(!a){
+    renderSignalPending('insufficient');
+    return;
+  }
+
   state.analysis=a;
   Stores[state.asset].analysis=a;
-  $('staleBadge').classList.toggle('hidden', !isStale());
-  renderSignal(a); renderRegime(a); renderMatrix(a); renderReasoning(a); renderLevels(a);
+
+  $('staleBadge').classList.toggle('hidden',!isStale());
+  renderSignal(a);
+  renderRegime(a);
+  renderMatrix(a);
+  renderReasoning(a);
+  renderLevels(a);
   renderWatchlist();
-  if(a.signal==='WAIT'){ state.signalArmed=true; Stores[state.asset].signalArmed=true; if(state.plan){state.plan=null;Stores[state.asset].plan=null;} return a; }
-  if(!state.plan && allowGeneration && state.signalArmed && isOptimumSignal(a)) generatePlan(a,opts.reason||'MARKET_CONDITION');
-  else if(state.plan) {
-    const p=state.plan, w=p.windows[0];
-    const now=Date.now();
-    const flipped = (p.primaryDir==='BUY'&&a.signal==='SELL') || (p.primaryDir==='SELL'&&a.signal==='BUY');
-    if(flipped && a.confidence>=66 && now-state.lastRegenCooldown>45000 && w && w.status==='ACTIVE'){
-      w.status='INVALIDATED';
-      pushHistory({ time:w.start, signal:w.dir, price:state.shownPrice||a.px, confidence:w.confidence, result:'Invalidated' });
-      state.lastRegenCooldown=now;
-      toast(ASSETS[state.asset].base+' SIGNAL INVALIDATED — WAITING FOR NEXT OPTIMUM SETUP','warn');
-    }
-  }
+
+  return a;
 }
 function refreshAnalysis(manual){
   runAnalysis(true,{allowSignalGeneration:false,reason:'MANUAL_VIEW_REFRESH'});
@@ -1953,6 +1976,8 @@ function evaluateWindow(w){
     if(w.dir==='BUY' && w.min!=null && w.min<state.analysis.stop) result='Invalidated';
     if(w.dir==='SELL' && w.max!=null && w.max>state.analysis.stop) result='Invalidated';
   }
+
+  if(w.status!=='INVALIDATED') w.status='COMPLETED';
 
   const recorded = pushHistory({
     time:w.start,
@@ -1990,7 +2015,18 @@ Bus.on('candles', key=>{
     }
   }
 });
-Bus.on('candleClose', key=>{ if(key===state.asset) runAnalysis(true,{allowSignalGeneration:true,reason:'CANDLE_CLOSE'}); });
+Bus.on('candleClose', key=>{
+  if(key!==state.asset) return;
+
+  const a=runAnalysis(true,{allowSignalGeneration:false,reason:'CANDLE_CLOSE'});
+  if(!a) return;
+
+  // Only a genuine candle-close event may arm a new signal.
+  if(!state.plan && isOptimumSignal(a)){
+    state.signalArmed=true;
+    generatePlan(a,'CANDLE_CLOSE');
+  }
+});
 Bus.on('feedState', ()=>{ feedPillUI(); renderWatchStatus(); renderSelector(); });
 
 setInterval(()=>{
@@ -2032,6 +2068,14 @@ function buildTFButtons(){
     if(b.dataset.tf===state.tfId) return;
     const oldView=viewStore(state.asset,state.tfId); oldView.plan=state.plan; oldView.history=state.history; oldView.analysis=state.analysis; oldView.signalArmed=state.signalArmed;
     state.tfId=b.dataset.tf;
+
+    // A view change never authorizes a new PnL signal.
+    // Any restored plan remains display/history state only.
+    state.signalArmed=false;
+    if (state.plan) {
+      state.plan.pnLAuthorized=false;
+    }
+
     document.querySelectorAll('.tfbtn').forEach(x=>x.className='tfbtn px-2.5 py-1 rounded-md text-[11px] font-mono transition '+(x.dataset.tf===state.tfId?'bg-white/10 text-white':'text-mut hover:text-slate-300'));
     const nextView=viewStore(state.asset,state.tfId); state.plan=nextView.plan||null; state.history=nextView.history||[]; state.analysis=nextView.analysis||null; state.signalArmed=nextView.signalArmed!==false;
     marketData[state.asset].candles=[]; marketData[state.asset].candleStamp=0; marketData[state.asset].candleTf=null; marketData[state.asset].watchSig=null;
@@ -2181,7 +2225,15 @@ setInterval(()=>{ if(RestPoller.active===false && Feed.state!=='ONLINE' && Feed.
         signal: a.signal, confidence: a.confidence, entryLow: a.entryLow, entryHigh: a.entryHigh, stop: a.stop, target: a.target,
         regime: a.regime, strength: a.strength, volLabel: a.volLabel, momentum: a.momentum,
         signalId: (state.plan && state.plan.signalId) || stableSignalId(k, state.tfId, a.signal),
-        signalActive: !!(state.plan && state.plan.windows && state.plan.windows[0] && state.plan.windows[0].status==='ACTIVE' && (a.signal==='BUY'||a.signal==='SELL')),
+        signalActive: !!(
+          state.plan &&
+          state.plan.pnLAuthorized === true &&
+          state.plan.activationId === state.plan.signalId &&
+          state.plan.windows &&
+          state.plan.windows[0] &&
+          state.plan.windows[0].status === 'ACTIVE' &&
+          (a.signal==='BUY'||a.signal==='SELL')
+        ),
         planStatus: (state.plan && state.plan.windows && state.plan.windows[0]) ? state.plan.windows[0].status : null,
         dataQuality: 'ok' };
     }
